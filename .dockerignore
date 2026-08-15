@@ -1,0 +1,9 @@
+.venv/
+venv/
+.idea/
+cache/
+README.MD
+.env
+__pycache__/
+*.pyc
+bot_intensive.db

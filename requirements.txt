@@ -1,0 +1,9 @@
+aiogram>=3.0
+yookassa
+python-dotenv
+sqlalchemy>=2.0
+aiosqlite
+pytz
+dotenv
+environs
+betterlogging

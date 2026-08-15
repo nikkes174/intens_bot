@@ -1,0 +1,19 @@
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    working_dir: /app
+    volumes:
+
+      - ./:/app
+    command: >
+      sh -c 'touch /app/bot_intensive.db && exec python -m bot'
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
