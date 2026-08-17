@@ -18,7 +18,7 @@ async def on_startup(bot: Bot, admin_ids: list[int]):
 
     commands = [
         BotCommand(command="start", description="Перезапуск бота"),
-        BotCommand(command="/admin_panel", description="Панель админа"),
+
 
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
