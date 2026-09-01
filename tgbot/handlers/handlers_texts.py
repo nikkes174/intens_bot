@@ -1,13 +1,14 @@
+# Оферта (договор публичной оферты)
+LINK_OFFER = "https://drive.google.com/file/d/1f8EsZkAFxktL-xAO12CbkNO4DaaG6jwJ/view?usp=sharing"
 
+# Политика конфиденциальности и обработки персональных данных
+LINK_PRIVACY_POLICY = "https://drive.google.com/file/d/11I33DhKUp0iW8FsEfscZQoFGuKcZrrEC/view?usp=sharing"
 
+# Согласие на получение рекламных сообщений в Telegram
+LINK_MARKETING_CONSENT = "https://drive.google.com/file/d/1E3qAdnaK_QX6p_yPeIBFuQuYLqEatGFM/view?usp=sharing"
 
-
-LINK_CONSENT = "https://docs.google.com/document/d/1ID2NEFT7d4rxd27FtZOol2ARwRwH4J9O5400u1fs3CA/edit?usp=drivesdk"
-LINK_PRIVACY_POLICY = "https://docs.google.com/document/d/1lyP1-tnLSjPQ2CgoP-G1Ys1LZxE2j5A9YofQB1Qtn4w/edit?usp=sharing"
-LINK_MARKETING_CONSENT = "https://docs.google.com/document/d/1TTBMphDiaEanhq1bXwknP57MmME2mNUoK5HaV3m68C0/edit?usp=drivesdk"
-LINK_OFFER = "https://docs.google.com/document/d/1rkKrhXcQtj0XhCo51cxJ_y4Dkic6Po8YBJofVckG2fA/edit?usp=drivesdk"
-LINK_PUBLICITY = "https://docs.google.com/document/d/150u1pZpOtPnxpGFYjlpR2zG4T5OpXxrhb9qGNdn-3cY/edit?usp=sharing"
-
+# Уведомление об обработке персональных данных в Telegram
+LINK_CONSENT = "https://drive.google.com/file/d/1DWenH6DM0xcDeuGXLfFxJesueu-rsQCa/view?usp=sharing"
 
 ACCESS_HANDLER = f"""
 Согласно законодательству РФ нам необходимо ваше согласие на получение писем от нас.
@@ -17,7 +18,6 @@ ACCESS_HANDLER = f"""
 политикой обработки персональных данных</a> и даёте <a href="{LINK_MARKETING_CONSENT}">
 согласие на получение информационных и рекламных сообщений.</a>
 Также Вы подтверждаете, что ознакомились с <a href="{LINK_OFFER}">офертой</a>.
-Даёте согласие на запись голоса и изображения, а также на публикацию отзывов с использованием Ваших данных — <a href="{LINK_PUBLICITY}">ознакомиться с условиями</a>.
 """
 
 START_TEXT = """
