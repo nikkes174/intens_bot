@@ -3,7 +3,7 @@ from aiogram import Router, Dispatcher, F, Bot, types
 from aiogram.filters import CommandStart
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ChatJoinRequest, Message
-from tgbot.handlers.handlers_texts import ACCES_HANDLER, START_TEXT
+from tgbot.handlers.handlers_texts import START_TEXT, ACCESS_HANDLER
 from tgbot.keyboards.inline import first_start_keyboard, to_back, access_kb
 from tgbot.services.payment import payment_service
 
@@ -29,7 +29,7 @@ async def user_start(message: Message):
         print(f"⚠️ Ошибка удаления сообщения: {e}")
 
     await message.answer(
-        ACCES_HANDLER,
+        ACCESS_HANDLER,
         reply_markup=access_kb(),
         parse_mode="HTML",
         disable_web_page_preview=True
