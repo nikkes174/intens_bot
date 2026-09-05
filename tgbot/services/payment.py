@@ -24,6 +24,7 @@ class PaymentService:
         self.return_url = os.getenv("YOOKASSA_RETURN_URL")
         self.channel_id = os.getenv("CHANNEL_CHAT_ID")
         self.amount = PAYMENT_AMOUNT
+        self.vat_code = os.getenv("YOOKASSA_VAT_CODE")
         self._tasks: set[asyncio.Task] = set()
 
     def _configure_yookassa(self) -> None:
@@ -41,9 +42,15 @@ class PaymentService:
         return chat_id == self._get_channel_id()
 
     async def create_payment(
-        self, user_id: int, username: Optional[str]
+        self, user_id: int, username: Optional[str], email: str
     ) -> tuple[str, str]:
         self._configure_yookassa()
+        if not self.vat_code:
+            raise RuntimeError("YOOKASSA_VAT_CODE is not configured")
+        try:
+            vat_code = int(self.vat_code)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("YOOKASSA_VAT_CODE must be an integer") from exc
         payload = {
             "amount": {"value": self.amount, "currency": "RUB"},
             "confirmation": {
@@ -53,6 +60,17 @@ class PaymentService:
             "capture": True,
             "description": f"Подписка для пользователя {user_id}",
             "metadata": {"user_id": str(user_id)},
+            "receipt": {
+                "customer": {"email": email},
+                "items": [{
+                    "description": "Подписка на закрытый канал на 1 месяц",
+                    "quantity": "1.00",
+                    "amount": {"value": self.amount, "currency": "RUB"},
+                    "payment_mode": "full_payment",
+                    "payment_subject": "service",
+                    "vat_code": vat_code,
+                }],
+            },
         }
         payment = await asyncio.to_thread(Payment.create, payload)
 

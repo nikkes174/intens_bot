@@ -2,6 +2,7 @@ import logging
 import re
 from aiogram import Router, Dispatcher, F, Bot, types
 from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ChatJoinRequest, Message
 from tgbot.handlers.handlers_texts import START_TEXT, ACCESS_HANDLER
@@ -17,6 +18,10 @@ API_URL = "http://localhost:8000"
 
 class BroadcastStates(StatesGroup):
     waiting_for_message = State()
+
+
+class PaymentStates(StatesGroup):
+    waiting_for_email = State()
 
 
 def escape_markdown_v2(text: str) -> str:
@@ -50,20 +55,34 @@ async def access_ok(callback_query: types.CallbackQuery):
 
 
 @user_router.callback_query(F.data == "paying_for_subscriptions")
-async def pay_one_month(callback_query: types.CallbackQuery, bot: Bot):
+async def pay_one_month(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.answer()
+
+    await state.set_state(PaymentStates.waiting_for_email)
+    await callback_query.message.answer("Введите email для получения электронного чека:")
+
+
+@user_router.message(PaymentStates.waiting_for_email)
+async def process_payment_email(message: Message, state: FSMContext, bot: Bot):
+    email = (message.text or "").strip()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        await message.answer("Некорректный email. Введите email ещё раз:")
+        return
+
+    await state.clear()
 
     try:
         payment_id, payment_url = await payment_service.create_payment(
-            callback_query.from_user.id,
-            callback_query.from_user.username,
+            message.from_user.id,
+            message.from_user.username,
+            email,
         )
     except Exception:
         logger.exception(
             "Не удалось создать ссылку на оплату для пользователя %s",
-            callback_query.from_user.id,
+            message.from_user.id,
         )
-        await callback_query.message.answer("Не удалось создать ссылку на оплату. Попробуйте позже.")
+        await message.answer("Не удалось создать ссылку на оплату. Попробуйте позже.")
         return
 
     text = (
@@ -72,12 +91,12 @@ async def pay_one_month(callback_query: types.CallbackQuery, bot: Bot):
     )
 
     payment_message = await bot.send_message(
-        callback_query.from_user.id,
+        message.from_user.id,
         text,
         parse_mode="HTML"
     )
 
-    payment_service.start_payment_monitor(payment_id, callback_query.from_user.id, bot)
+    payment_service.start_payment_monitor(payment_id, message.from_user.id, bot)
 
 
 @user_router.chat_join_request()
