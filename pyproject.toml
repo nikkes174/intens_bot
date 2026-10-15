@@ -51,6 +51,12 @@ ignore = [
 "tgbot/db/models.py" = [
     "DTZ011",   # date.today() without timezone
 ]
+"tgbot/db/crud_users.py" = [
+    "DTZ011",   # date.today() without timezone (legacy module)
+]
+"tgbot/services/outbox.py" = [
+    "PLR0917",  # too many positional arguments
+]
 "tgbot/handlers/user.py" = [
     "PLR0917",  # too many positional arguments
     "PLC0415",  # import not at top-level

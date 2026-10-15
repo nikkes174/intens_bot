@@ -79,13 +79,15 @@ class AccessService:
         if has_access:
             logger.info(
                 "Approving join request from user %s for training %s",
-                user_id, training.id,
+                user_id,
+                training.id,
             )
             return True
 
         logger.info(
             "Ignoring join request from user %s for training %s (no access)",
-            user_id, training.id,
+            user_id,
+            training.id,
         )
         return False
 

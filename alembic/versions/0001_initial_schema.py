@@ -5,6 +5,7 @@ Revises:
 Create Date: 2024-01-01 00:00:00.000000
 
 """
+
 import sqlalchemy as sa
 
 from alembic import op
@@ -50,9 +51,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(), nullable=True),
         sa.UniqueConstraint("telegram_chat_id", name="uq_training_chat_id"),
     )
-    op.create_index(
-        "ix_trainings_active_sort", "trainings", ["is_active", "sort_order"]
-    )
+    op.create_index("ix_trainings_active_sort", "trainings", ["is_active", "sort_order"])
 
     # Training materials table
     op.create_table(
@@ -104,9 +103,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("payment_id", name="uq_order_payment_id"),
     )
     op.create_index("ix_orders_user_status", "orders", ["user_id", "status"])
-    op.create_index(
-        "ix_orders_training_status", "orders", ["training_id", "status"]
-    )
+    op.create_index("ix_orders_training_status", "orders", ["training_id", "status"])
 
     # User training access table
     op.create_table(
@@ -188,9 +185,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(), nullable=True),
         sa.Column("processed_at", sa.DateTime(), nullable=True),
     )
-    op.create_index(
-        "ix_outbox_status_next", "outbox_events", ["status", "next_attempt_at"]
-    )
+    op.create_index("ix_outbox_status_next", "outbox_events", ["status", "next_attempt_at"])
 
     # Invite links table
     op.create_table(

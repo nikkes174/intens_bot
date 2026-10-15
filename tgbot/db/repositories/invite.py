@@ -29,9 +29,7 @@ class InviteRepository(BaseRepository):
         await self.session.refresh(invite)
         return invite
 
-    async def get_active_for_user(
-        self, user_id: int, training_id: int
-    ) -> InviteLinkModel | None:
+    async def get_active_for_user(self, user_id: int, training_id: int) -> InviteLinkModel | None:
         result = await self.session.execute(
             select(InviteLinkModel).where(
                 InviteLinkModel.user_id == user_id,

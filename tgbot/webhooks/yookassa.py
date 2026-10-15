@@ -76,9 +76,7 @@ async def yookassa_webhook(request: Request, config: YooKassaConfig):
                 raise HTTPException(status_code=400, detail="Currency mismatch")
 
             # Update order
-            await order_repo.update_status(
-                order.id, "succeeded", paid_at=datetime.utcnow()
-            )
+            await order_repo.update_status(order.id, "succeeded", paid_at=datetime.utcnow())
 
             # Grant access
             await access_repo.grant_access(order.user_id, order.training_id, order.id)
@@ -86,12 +84,14 @@ async def yookassa_webhook(request: Request, config: YooKassaConfig):
             # Create outbox event
             await outbox_repo.create_event(
                 "payment_succeeded",
-                json.dumps({
-                    "order_id": order.id,
-                    "user_id": order.user_id,
-                    "training_id": order.training_id,
-                    "payment_id": payment_id,
-                }),
+                json.dumps(
+                    {
+                        "order_id": order.id,
+                        "user_id": order.user_id,
+                        "training_id": order.training_id,
+                        "payment_id": payment_id,
+                    }
+                ),
             )
 
             logger.info("Payment %s processed successfully", payment_id)

@@ -6,10 +6,7 @@ from tgbot.db.models import TrainingModel
 
 def access_kb():
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text="✅️‍ПОДТВЕРЖДАЮ✅",
-        callback_data="access_ok"
-    )
+    builder.button(text="✅️‍ПОДТВЕРЖДАЮ✅", callback_data="access_ok")
     builder.adjust(1, 1)
     return builder.as_markup()
 
@@ -19,10 +16,7 @@ def catalog_keyboard(trainings: list[TrainingModel]) -> InlineKeyboardMarkup:
     emojis = ["🏋️", "💪", "🔥", "🏃", "⚡"]
     for i, training in enumerate(trainings):
         emoji = emojis[i] if i < len(emojis) else "🏋️"
-        builder.button(
-            text=f"{emoji} {training.title}",
-            callback_data=f"training_{training.id}"
-        )
+        builder.button(text=f"{emoji} {training.title}", callback_data=f"training_{training.id}")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -66,8 +60,7 @@ def admin_trainings_keyboard(trainings: list[TrainingModel]) -> InlineKeyboardMa
     for training in trainings:
         status = "🟢" if training.is_active else "🔴"
         builder.button(
-            text=f"{status} {training.title}",
-            callback_data=f"admin_training_{training.id}"
+            text=f"{status} {training.title}", callback_data=f"admin_training_{training.id}"
         )
     builder.button(text="🔙 Назад", callback_data="admin_back")
     builder.adjust(1)
@@ -95,7 +88,7 @@ def admin_materials_keyboard(materials: list, training_id: int) -> InlineKeyboar
     for i, material in enumerate(materials, 1):
         builder.button(
             text=f"{i}. {material.file_name or material.material_type}",
-            callback_data=f"admin_material_{material.id}"
+            callback_data=f"admin_material_{material.id}",
         )
     builder.button(text="➕ Добавить материал", callback_data=f"admin_add_material_{training_id}")
     builder.button(text="🗑 Удалить материал", callback_data=f"admin_delete_material_{training_id}")
@@ -122,10 +115,7 @@ def admin_back_keyboard() -> InlineKeyboardMarkup:
 
 def to_back():
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text="Назад 🔙️",
-        callback_data="back_to"
-    )
+    builder.button(text="Назад 🔙️", callback_data="back_to")
     builder.adjust(1)
     return builder.as_markup()
 

@@ -1,4 +1,5 @@
 """Seed data for initial trainings."""
+
 import logging
 
 from tgbot.db.db import get_session_factory

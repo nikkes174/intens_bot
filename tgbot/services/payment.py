@@ -62,14 +62,16 @@ class PaymentService:
             },
             "receipt": {
                 "customer": {"email": email},
-                "items": [{
-                    "description": description or f"Тренировка #{training_id}",
-                    "quantity": "1.00",
-                    "amount": {"value": str(amount), "currency": currency},
-                    "payment_mode": "full_payment",
-                    "payment_subject": "service",
-                    "vat_code": self.config.vat_code,
-                }],
+                "items": [
+                    {
+                        "description": description or f"Тренировка #{training_id}",
+                        "quantity": "1.00",
+                        "amount": {"value": str(amount), "currency": currency},
+                        "payment_mode": "full_payment",
+                        "payment_subject": "service",
+                        "vat_code": self.config.vat_code,
+                    }
+                ],
             },
         }
 
@@ -134,21 +136,23 @@ class PaymentService:
         if Decimal(payment_info["amount"]) != order.amount:
             logger.error(
                 "Amount mismatch for payment %s: expected %s, got %s",
-                payment_id, order.amount, payment_info["amount"],
+                payment_id,
+                order.amount,
+                payment_info["amount"],
             )
             return False
 
         if payment_info["currency"] != order.currency:
             logger.error(
                 "Currency mismatch for payment %s: expected %s, got %s",
-                payment_id, order.currency, payment_info["currency"],
+                payment_id,
+                order.currency,
+                payment_info["currency"],
             )
             return False
 
         # Update order status
-        await order_repo.update_status(
-            order.id, "succeeded", paid_at=datetime.utcnow()
-        )
+        await order_repo.update_status(order.id, "succeeded", paid_at=datetime.utcnow())
 
         # Grant access
         await access_repo.grant_access(order.user_id, order.training_id, order.id)
@@ -156,12 +160,14 @@ class PaymentService:
         # Create outbox events for delivery and invite
         await outbox_repo.create_event(
             "payment_succeeded",
-            json.dumps({
-                "order_id": order.id,
-                "user_id": order.user_id,
-                "training_id": order.training_id,
-                "payment_id": payment_id,
-            }),
+            json.dumps(
+                {
+                    "order_id": order.id,
+                    "user_id": order.user_id,
+                    "training_id": order.training_id,
+                    "payment_id": payment_id,
+                }
+            ),
         )
 
         logger.info("Payment %s processed successfully for order %s", payment_id, order.id)

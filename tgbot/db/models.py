@@ -44,9 +44,7 @@ class TrainingModel(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
-    price: Mapped[Decimal] = mapped_column(
-        Numeric(10, 2), nullable=False, default=Decimal("0")
-    )
+    price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0"))
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="RUB")
     telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -145,9 +143,7 @@ class UserTrainingAccessModel(Base):
     user = relationship("UserModel", back_populates="accesses")
     training = relationship("TrainingModel", back_populates="accesses")
 
-    __table_args__ = (
-        UniqueConstraint("user_id", "training_id", name="uq_user_training_access"),
-    )
+    __table_args__ = (UniqueConstraint("user_id", "training_id", name="uq_user_training_access"),)
 
 
 class MaterialDeliveryModel(Base):
@@ -178,9 +174,7 @@ class MaterialDeliveryModel(Base):
 
     material = relationship("TrainingMaterialModel", back_populates="deliveries")
 
-    __table_args__ = (
-        UniqueConstraint("user_id", "material_id", name="uq_material_delivery"),
-    )
+    __table_args__ = (UniqueConstraint("user_id", "material_id", name="uq_material_delivery"),)
 
 
 class OutboxEventModel(Base):
@@ -198,9 +192,7 @@ class OutboxEventModel(Base):
     created_at: Mapped[datetime | None] = mapped_column(DateTime, default=datetime.utcnow)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-    __table_args__ = (
-        Index("ix_outbox_status_next", "status", "next_attempt_at"),
-    )
+    __table_args__ = (Index("ix_outbox_status_next", "status", "next_attempt_at"),)
 
 
 class InviteLinkModel(Base):

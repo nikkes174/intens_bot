@@ -7,9 +7,7 @@ from tgbot.db.repositories.base import BaseRepository
 
 
 class DeliveryRepository(BaseRepository):
-    async def get_delivery(
-        self, user_id: int, material_id: int
-    ) -> MaterialDeliveryModel | None:
+    async def get_delivery(self, user_id: int, material_id: int) -> MaterialDeliveryModel | None:
         result = await self.session.execute(
             select(MaterialDeliveryModel).where(
                 MaterialDeliveryModel.user_id == user_id,

@@ -9,12 +9,12 @@ from aiogram.types import ChatJoinRequest, Message
 
 from tgbot.db.db import get_session_factory
 from tgbot.db.repositories.access import AccessRepository
+from tgbot.db.repositories.delivery import DeliveryRepository
+from tgbot.db.repositories.invite import InviteRepository
+from tgbot.db.repositories.material import MaterialRepository
 from tgbot.db.repositories.order import OrderRepository
 from tgbot.db.repositories.training import TrainingRepository
 from tgbot.db.repositories.user import UserRepository
-from tgbot.db.repositories.delivery import DeliveryRepository
-from tgbot.db.repositories.material import MaterialRepository
-from tgbot.db.repositories.invite import InviteRepository
 from tgbot.handlers.handlers_texts import ACCESS_HANDLER
 from tgbot.keyboards.inline import (
     access_kb,
@@ -44,10 +44,7 @@ async def user_start(message: Message):
         logger.debug("Failed to delete message: %s", e)
 
     await message.answer(
-        ACCESS_HANDLER,
-        reply_markup=access_kb(),
-        parse_mode="HTML",
-        disable_web_page_preview=True
+        ACCESS_HANDLER, reply_markup=access_kb(), parse_mode="HTML", disable_web_page_preview=True
     )
 
 
@@ -112,9 +109,7 @@ async def show_training(callback_query: types.CallbackQuery, bot: Bot):
 
     await callback_query.message.edit_text(
         text,
-        reply_markup=training_card_keyboard(
-            training_id, has_access, float(training.price)
-        ),
+        reply_markup=training_card_keyboard(training_id, has_access, float(training.price)),
         parse_mode="HTML",
     )
 
@@ -227,8 +222,11 @@ async def get_materials(callback_query: types.CallbackQuery, bot: Bot):
 
         delivery_service = DeliveryService(bot)
         await delivery_service.deliver_materials(
-            user_id, training_id,
-            delivery_repo, material_repo, training_repo,
+            user_id,
+            training_id,
+            delivery_repo,
+            material_repo,
+            training_repo,
         )
 
 
@@ -243,9 +241,7 @@ async def join_group(callback_query: types.CallbackQuery, bot: Bot):
     async with session_factory() as session:
         access_repo = AccessRepository(session)
         if not await access_repo.has_active_access(user_id, training_id):
-            await callback_query.message.answer(
-                "У вас нет доступа к этой группе."
-            )
+            await callback_query.message.answer("У вас нет доступа к этой группе.")
             return
 
         training_repo = TrainingRepository(session)
@@ -253,8 +249,10 @@ async def join_group(callback_query: types.CallbackQuery, bot: Bot):
 
         access_service = AccessService(bot)
         invite_link = await access_service.create_invite_link(
-            user_id, training_id,
-            training_repo, invite_repo,
+            user_id,
+            training_id,
+            training_repo,
+            invite_repo,
         )
 
     if invite_link:
@@ -280,8 +278,10 @@ async def handle_join_request(join_request: ChatJoinRequest, bot: Bot):
 
         access_service = AccessService(bot)
         approved = await access_service.handle_join_request(
-            user_id, chat_id,
-            access_repo, training_repo,
+            user_id,
+            chat_id,
+            access_repo,
+            training_repo,
         )
 
     if approved:

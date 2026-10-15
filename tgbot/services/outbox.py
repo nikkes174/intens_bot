@@ -77,15 +77,20 @@ class OutboxProcessor:
         # Deliver materials
         if self.delivery_service:
             await self.delivery_service.deliver_materials(
-                user_id, training_id,
-                self.delivery_repo, self.training_repo, self.training_repo,
+                user_id,
+                training_id,
+                self.delivery_repo,
+                self.training_repo,
+                self.training_repo,
             )
 
         # Send invite link
         if self.access_service:
             invite_link = await self.access_service.create_invite_link(
-                user_id, training_id,
-                self.training_repo, self.training_repo,
+                user_id,
+                training_id,
+                self.training_repo,
+                self.training_repo,
             )
             if invite_link:
                 await self.bot.send_message(
@@ -98,8 +103,11 @@ class OutboxProcessor:
         data = json.loads(payload)
         if self.delivery_service:
             await self.delivery_service.deliver_materials(
-                data["user_id"], data["training_id"],
-                self.delivery_repo, self.training_repo, self.training_repo,
+                data["user_id"],
+                data["training_id"],
+                self.delivery_repo,
+                self.training_repo,
+                self.training_repo,
             )
 
     async def _handle_send_invite(self, payload: str):
@@ -107,8 +115,10 @@ class OutboxProcessor:
         data = json.loads(payload)
         if self.access_service:
             invite_link = await self.access_service.create_invite_link(
-                data["user_id"], data["training_id"],
-                self.training_repo, self.training_repo,
+                data["user_id"],
+                data["training_id"],
+                self.training_repo,
+                self.training_repo,
             )
             if invite_link:
                 await self.bot.send_message(

@@ -404,9 +404,7 @@ async def process_chat_id(message: Message, state: FSMContext, bot: Bot):
         # Check if group is already linked to another training
         existing = await training_repo.get_by_chat_id(chat_id)
         if existing and existing.id != training_id:
-            await message.answer(
-                f"❌ Эта группа уже привязана к тренировке «{existing.title}»."
-            )
+            await message.answer(f"❌ Эта группа уже привязана к тренировке «{existing.title}».")
             return
 
         # Verify bot is admin in the group
@@ -544,6 +542,4 @@ async def admin_stats(callback_query: types.CallbackQuery, config: Config):
             title = training.title if training else f"#{training_id}"
             text += f"  - {title}: {count} шт., {total} ₽\n"
 
-    await callback_query.message.edit_text(
-        text, reply_markup=admin_back_keyboard()
-    )
+    await callback_query.message.edit_text(text, reply_markup=admin_back_keyboard())

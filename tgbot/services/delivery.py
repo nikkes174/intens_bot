@@ -49,9 +49,7 @@ class DeliveryService:
 
             # Create delivery record if not exists
             if not existing:
-                existing = await delivery_repo.create(
-                    user_id, training_id, material.id
-                )
+                existing = await delivery_repo.create(user_id, training_id, material.id)
 
             # Send with retries
             for attempt in range(self.MAX_RETRIES):
@@ -63,7 +61,11 @@ class DeliveryService:
                 except TelegramAPIError as e:
                     logger.warning(
                         "Failed to send material %s to user %s (attempt %d/%d): %s",
-                        material.id, user_id, attempt + 1, self.MAX_RETRIES, e,
+                        material.id,
+                        user_id,
+                        attempt + 1,
+                        self.MAX_RETRIES,
+                        e,
                     )
                     if attempt < self.MAX_RETRIES - 1:
                         await asyncio.sleep(self.RETRY_DELAY)
@@ -73,7 +75,9 @@ class DeliveryService:
                 except Exception as e:
                     logger.exception(
                         "Unexpected error sending material %s to user %s: %s",
-                        material.id, user_id, e,
+                        material.id,
+                        user_id,
+                        e,
                     )
                     await delivery_repo.mark_failed(existing.id, str(e))
                     failed += 1
@@ -81,7 +85,10 @@ class DeliveryService:
 
         logger.info(
             "Delivery completed for user %s, training %s: %d delivered, %d failed",
-            user_id, training_id, delivered, failed,
+            user_id,
+            training_id,
+            delivered,
+            failed,
         )
         return {"success": True, "delivered": delivered, "failed": failed}
 
@@ -121,5 +128,6 @@ class DeliveryService:
         else:
             logger.warning(
                 "Material %s has no content to send (type: %s)",
-                material.id, material.material_type,
+                material.id,
+                material.material_type,
             )

@@ -1,5 +1,4 @@
 from collections.abc import AsyncGenerator
-from typing import Optional
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -19,7 +18,7 @@ class Base(DeclarativeBase):
 class Database:
     def __init__(self):
         self.engine = None
-        self.session_factory: Optional[async_sessionmaker[AsyncSession]] = None
+        self.session_factory: async_sessionmaker[AsyncSession] | None = None
 
     def initialize(self, db_config: DbConfig):
         if self.engine is not None:

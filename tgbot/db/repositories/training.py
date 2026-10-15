@@ -1,4 +1,3 @@
-
 from sqlalchemy import select
 
 from tgbot.db.models import TrainingModel
@@ -14,9 +13,7 @@ class TrainingRepository(BaseRepository):
 
     async def get_active(self) -> list[TrainingModel]:
         result = await self.session.execute(
-            select(TrainingModel)
-            .where(TrainingModel.is_active)
-            .order_by(TrainingModel.sort_order)
+            select(TrainingModel).where(TrainingModel.is_active).order_by(TrainingModel.sort_order)
         )
         return list(result.scalars().all())
 
@@ -84,6 +81,7 @@ class TrainingRepository(BaseRepository):
         from sqlalchemy import func
 
         from tgbot.db.models import TrainingMaterialModel
+
         result = await self.session.execute(
             select(func.count(TrainingMaterialModel.id)).where(
                 TrainingMaterialModel.training_id == training_id

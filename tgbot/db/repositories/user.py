@@ -1,4 +1,3 @@
-
 from sqlalchemy import select
 
 from tgbot.db.models import UserModel
@@ -13,9 +12,7 @@ class UserRepository(BaseRepository):
         return result.scalar_one_or_none()
 
     async def get_by_id(self, user_id: int) -> UserModel | None:
-        result = await self.session.execute(
-            select(UserModel).where(UserModel.id == user_id)
-        )
+        result = await self.session.execute(select(UserModel).where(UserModel.id == user_id))
         return result.scalar_one_or_none()
 
     async def create(self, telegram_user_id: int, username: str | None = None) -> UserModel:

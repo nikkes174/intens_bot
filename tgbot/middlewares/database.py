@@ -23,7 +23,7 @@ class DatabaseMiddleware(BaseMiddleware):
                 event.from_user.id,
                 event.from_user.full_name,
                 event.from_user.language_code,
-                event.from_user.username
+                event.from_user.username,
             )
 
             data["session"] = session

@@ -1,4 +1,3 @@
-
 from sqlalchemy import select
 
 from tgbot.db.models import TrainingMaterialModel
@@ -62,6 +61,7 @@ class MaterialRepository(BaseRepository):
 
     async def get_max_sort_order(self, training_id: int) -> int:
         from sqlalchemy import func
+
         result = await self.session.execute(
             select(func.max(TrainingMaterialModel.sort_order)).where(
                 TrainingMaterialModel.training_id == training_id

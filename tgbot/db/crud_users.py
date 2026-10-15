@@ -33,9 +33,7 @@ class UserCrud:
         return result.scalars().all()
 
     async def get_user(self, user_id: int):
-        result = await self.session.execute(
-            select(UserModel).where(UserModel.user_id == user_id)
-        )
+        result = await self.session.execute(select(UserModel).where(UserModel.user_id == user_id))
         return result.scalar_one_or_none()
 
     async def set_payment_pending(

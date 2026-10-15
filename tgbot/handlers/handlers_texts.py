@@ -2,13 +2,19 @@
 LINK_OFFER = "https://drive.google.com/file/d/1DVAzgcNflLib9qSObQn4dKU7-ROyLKGp/view?usp=drive_link"
 
 # Политика конфиденциальности и обработки персональных данных
-LINK_PRIVACY_POLICY = "https://drive.google.com/file/d/10aa3_0wQKO4GSyfhk87DJfst3ahWE1Jx/view?usp=drive_link"
+LINK_PRIVACY_POLICY = (
+    "https://drive.google.com/file/d/10aa3_0wQKO4GSyfhk87DJfst3ahWE1Jx/view?usp=drive_link"
+)
 
 # Согласие на получение рекламных сообщений в Telegram
-LINK_MARKETING_CONSENT = "https://drive.google.com/file/d/1slt9TCuPiHXrPlLMvOotqCZP3g03s1cu/view?usp=sharing"
+LINK_MARKETING_CONSENT = (
+    "https://drive.google.com/file/d/1slt9TCuPiHXrPlLMvOotqCZP3g03s1cu/view?usp=sharing"
+)
 
 # Уведомление об обработке персональных данных в Telegram
-LINK_CONSENT = "https://drive.google.com/file/d/1HYYkZfAr-lP7w3v_WnBJc028iqB8p6o5/view?usp=drive_link"
+LINK_CONSENT = (
+    "https://drive.google.com/file/d/1HYYkZfAr-lP7w3v_WnBJc028iqB8p6o5/view?usp=drive_link"
+)
 
 ACCESS_HANDLER = f"""
 Согласно законодательству РФ нам необходимо ваше согласие на получение писем от нас.

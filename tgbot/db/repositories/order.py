@@ -8,9 +8,7 @@ from tgbot.db.repositories.base import BaseRepository
 
 class OrderRepository(BaseRepository):
     async def get_by_id(self, order_id: int) -> OrderModel | None:
-        result = await self.session.execute(
-            select(OrderModel).where(OrderModel.id == order_id)
-        )
+        result = await self.session.execute(select(OrderModel).where(OrderModel.id == order_id))
         return result.scalar_one_or_none()
 
     async def get_by_payment_id(self, payment_id: str) -> OrderModel | None:
@@ -79,6 +77,7 @@ class OrderRepository(BaseRepository):
 
     async def get_total_revenue(self) -> float:
         from sqlalchemy import func
+
         result = await self.session.execute(
             select(func.sum(OrderModel.amount)).where(OrderModel.status == "succeeded")
         )
@@ -86,6 +85,7 @@ class OrderRepository(BaseRepository):
 
     async def get_sales_by_training(self) -> list[tuple[int, int, float]]:
         from sqlalchemy import func
+
         result = await self.session.execute(
             select(
                 OrderModel.training_id,
