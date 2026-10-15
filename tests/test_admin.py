@@ -1,14 +1,10 @@
 """Tests for admin panel."""
-import pytest
+
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from tgbot.config import Config
-from tgbot.db.repositories.training import TrainingRepository
-from tgbot.db.repositories.material import MaterialRepository
-from tgbot.db.repositories.user import UserRepository
-from tgbot.db.repositories.order import OrderRepository
-from tgbot.keyboards.inline import admin_menu_keyboard
 
 
 @pytest.fixture
@@ -25,12 +21,14 @@ def admin_config():
 def test_admin_can_open_admin_panel(admin_config):
     """Test that admin can open admin panel."""
     from tgbot.handlers.admin import is_admin
+
     assert is_admin(123456789, admin_config) is True
 
 
 def test_user_cannot_open_admin_panel(admin_config):
     """Test that regular user cannot open admin panel."""
     from tgbot.handlers.admin import is_admin
+
     assert is_admin(987654321, admin_config) is False
 
 
@@ -151,7 +149,7 @@ async def test_same_group_cannot_link_to_two_trainings(training_repo):
         price=Decimal("990.00"),
         sort_order=1,
     )
-    training2 = await training_repo.create(
+    await training_repo.create(
         title="Тренировка №2",
         description="Тест",
         price=Decimal("990.00"),

@@ -2,22 +2,21 @@ import asyncio
 import os
 import sys
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tgbot.db.db import Base, get_engine, get_session_factory, init_db, close_db
-from tgbot.db.repositories.user import UserRepository
-from tgbot.db.repositories.training import TrainingRepository
-from tgbot.db.repositories.material import MaterialRepository
-from tgbot.db.repositories.order import OrderRepository
+from tgbot.db.db import close_db, get_engine, get_session_factory, init_db
 from tgbot.db.repositories.access import AccessRepository
 from tgbot.db.repositories.delivery import DeliveryRepository
-from tgbot.db.repositories.outbox import OutboxRepository
 from tgbot.db.repositories.invite import InviteRepository
+from tgbot.db.repositories.material import MaterialRepository
+from tgbot.db.repositories.order import OrderRepository
+from tgbot.db.repositories.outbox import OutboxRepository
+from tgbot.db.repositories.training import TrainingRepository
+from tgbot.db.repositories.user import UserRepository
 
 
 @pytest.fixture(scope="session")

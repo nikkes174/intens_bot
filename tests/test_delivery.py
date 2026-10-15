@@ -1,12 +1,10 @@
 """Tests for material delivery."""
+
+from unittest.mock import AsyncMock
+
 import pytest
-from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
 
 from tgbot.services.delivery import DeliveryService
-from tgbot.db.repositories.delivery import DeliveryRepository
-from tgbot.db.repositories.material import MaterialRepository
-from tgbot.db.repositories.training import TrainingRepository
 
 
 @pytest.fixture
@@ -20,9 +18,17 @@ def delivery_service(mock_bot):
 
 
 @pytest.mark.asyncio
-async def test_video_sent_after_payment(delivery_service, mock_bot, delivery_repo, material_repo, training_repo, sample_user, sample_training):
+async def test_video_sent_after_payment(
+    delivery_service,
+    mock_bot,
+    delivery_repo,
+    material_repo,
+    training_repo,
+    sample_user,
+    sample_training,
+):
     """Test that video is sent after payment."""
-    material = await material_repo.create(
+    await material_repo.create(
         training_id=sample_training.id,
         material_type="video",
         telegram_file_id="video_123",
@@ -44,9 +50,17 @@ async def test_video_sent_after_payment(delivery_service, mock_bot, delivery_rep
 
 
 @pytest.mark.asyncio
-async def test_pdf_sent_after_payment(delivery_service, mock_bot, delivery_repo, material_repo, training_repo, sample_user, sample_training):
+async def test_pdf_sent_after_payment(
+    delivery_service,
+    mock_bot,
+    delivery_repo,
+    material_repo,
+    training_repo,
+    sample_user,
+    sample_training,
+):
     """Test that PDF is sent after payment."""
-    material = await material_repo.create(
+    await material_repo.create(
         training_id=sample_training.id,
         material_type="pdf",
         telegram_file_id="pdf_123",
@@ -68,7 +82,15 @@ async def test_pdf_sent_after_payment(delivery_service, mock_bot, delivery_repo,
 
 
 @pytest.mark.asyncio
-async def test_materials_sent_in_order(delivery_service, mock_bot, delivery_repo, material_repo, training_repo, sample_user, sample_training):
+async def test_materials_sent_in_order(
+    delivery_service,
+    mock_bot,
+    delivery_repo,
+    material_repo,
+    training_repo,
+    sample_user,
+    sample_training,
+):
     """Test that materials are sent in correct order."""
     await material_repo.create(
         training_id=sample_training.id,
@@ -98,9 +120,18 @@ async def test_materials_sent_in_order(delivery_service, mock_bot, delivery_repo
 
 
 @pytest.mark.asyncio
-async def test_unpaid_user_gets_no_materials(delivery_service, mock_bot, delivery_repo, material_repo, training_repo, access_repo, sample_user, sample_training):
+async def test_unpaid_user_gets_no_materials(
+    delivery_service,
+    mock_bot,
+    delivery_repo,
+    material_repo,
+    training_repo,
+    access_repo,
+    sample_user,
+    sample_training,
+):
     """Test that unpaid user doesn't receive materials."""
-    material = await material_repo.create(
+    await material_repo.create(
         training_id=sample_training.id,
         material_type="video",
         telegram_file_id="video_123",
@@ -119,9 +150,17 @@ async def test_unpaid_user_gets_no_materials(delivery_service, mock_bot, deliver
 
 
 @pytest.mark.asyncio
-async def test_repeat_delivery_works(delivery_service, mock_bot, delivery_repo, material_repo, training_repo, sample_user, sample_training):
+async def test_repeat_delivery_works(
+    delivery_service,
+    mock_bot,
+    delivery_repo,
+    material_repo,
+    training_repo,
+    sample_user,
+    sample_training,
+):
     """Test that materials can be re-delivered."""
-    material = await material_repo.create(
+    await material_repo.create(
         training_id=sample_training.id,
         material_type="video",
         telegram_file_id="video_123",
@@ -152,9 +191,17 @@ async def test_repeat_delivery_works(delivery_service, mock_bot, delivery_repo, 
 
 
 @pytest.mark.asyncio
-async def test_telegram_api_error_no_access_loss(delivery_service, mock_bot, delivery_repo, material_repo, training_repo, sample_user, sample_training):
+async def test_telegram_api_error_no_access_loss(
+    delivery_service,
+    mock_bot,
+    delivery_repo,
+    material_repo,
+    training_repo,
+    sample_user,
+    sample_training,
+):
     """Test that Telegram API error doesn't cause access loss."""
-    material = await material_repo.create(
+    await material_repo.create(
         training_id=sample_training.id,
         material_type="video",
         telegram_file_id="video_123",
@@ -178,9 +225,17 @@ async def test_telegram_api_error_no_access_loss(delivery_service, mock_bot, del
 
 
 @pytest.mark.asyncio
-async def test_undelivered_materials_recovered(delivery_service, mock_bot, delivery_repo, material_repo, training_repo, sample_user, sample_training):
+async def test_undelivered_materials_recovered(
+    delivery_service,
+    mock_bot,
+    delivery_repo,
+    material_repo,
+    training_repo,
+    sample_user,
+    sample_training,
+):
     """Test that undelivered materials are recovered on restart."""
-    material = await material_repo.create(
+    await material_repo.create(
         training_id=sample_training.id,
         material_type="video",
         telegram_file_id="video_123",

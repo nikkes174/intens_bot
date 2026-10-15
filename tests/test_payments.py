@@ -1,14 +1,12 @@
 """Tests for YooKassa payment integration."""
-import pytest
+
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from tgbot.db.repositories.order import OrderRepository
-from tgbot.db.repositories.access import AccessRepository
-from tgbot.db.repositories.user import UserRepository
-from tgbot.db.repositories.training import TrainingRepository
-from tgbot.services.payment import PaymentService
+import pytest
+
 from tgbot.config import YooKassaConfig
+from tgbot.services.payment import PaymentService
 
 
 @pytest.fixture
@@ -47,9 +45,11 @@ async def test_create_payment(payment_service):
 
 
 @pytest.mark.asyncio
-async def test_successful_payment_processing(payment_service, order_repo, access_repo, sample_user, sample_training):
+async def test_successful_payment_processing(
+    payment_service, order_repo, access_repo, sample_user, sample_training
+):
     """Test processing a successful payment."""
-    order = await order_repo.create(
+    await order_repo.create(
         user_id=sample_user.id,
         training_id=sample_training.id,
         amount=Decimal("990.00"),
@@ -103,7 +103,9 @@ async def test_canceled_payment(payment_service, order_repo, sample_user, sample
 
 
 @pytest.mark.asyncio
-async def test_duplicate_webhook_ignored(payment_service, order_repo, access_repo, sample_user, sample_training):
+async def test_duplicate_webhook_ignored(
+    payment_service, order_repo, access_repo, sample_user, sample_training
+):
     """Test that duplicate webhook doesn't create duplicate access."""
     order = await order_repo.create(
         user_id=sample_user.id,
@@ -143,9 +145,11 @@ async def test_duplicate_webhook_ignored(payment_service, order_repo, access_rep
 
 
 @pytest.mark.asyncio
-async def test_amount_mismatch_rejected(payment_service, order_repo, access_repo, sample_user, sample_training):
+async def test_amount_mismatch_rejected(
+    payment_service, order_repo, access_repo, sample_user, sample_training
+):
     """Test that payment with wrong amount is rejected."""
-    order = await order_repo.create(
+    await order_repo.create(
         user_id=sample_user.id,
         training_id=sample_training.id,
         amount=Decimal("990.00"),
@@ -174,9 +178,11 @@ async def test_amount_mismatch_rejected(payment_service, order_repo, access_repo
 
 
 @pytest.mark.asyncio
-async def test_currency_mismatch_rejected(payment_service, order_repo, access_repo, sample_user, sample_training):
+async def test_currency_mismatch_rejected(
+    payment_service, order_repo, access_repo, sample_user, sample_training
+):
     """Test that payment with wrong currency is rejected."""
-    order = await order_repo.create(
+    await order_repo.create(
         user_id=sample_user.id,
         training_id=sample_training.id,
         amount=Decimal("990.00"),
@@ -206,9 +212,11 @@ async def test_currency_mismatch_rejected(payment_service, order_repo, access_re
 
 
 @pytest.mark.asyncio
-async def test_payment_from_other_order_rejected(payment_service, order_repo, access_repo, sample_user, sample_training):
+async def test_payment_from_other_order_rejected(
+    payment_service, order_repo, access_repo, sample_user, sample_training
+):
     """Test that payment from different order is rejected."""
-    order1 = await order_repo.create(
+    await order_repo.create(
         user_id=sample_user.id,
         training_id=sample_training.id,
         amount=Decimal("990.00"),
@@ -238,9 +246,11 @@ async def test_payment_from_other_order_rejected(payment_service, order_repo, ac
 
 
 @pytest.mark.asyncio
-async def test_yookassa_api_error(payment_service, order_repo, access_repo, sample_user, sample_training):
+async def test_yookassa_api_error(
+    payment_service, order_repo, access_repo, sample_user, sample_training
+):
     """Test handling of YooKassa API error."""
-    order = await order_repo.create(
+    await order_repo.create(
         user_id=sample_user.id,
         training_id=sample_training.id,
         amount=Decimal("990.00"),

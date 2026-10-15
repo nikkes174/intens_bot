@@ -39,7 +39,10 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = [
+    "E501",     # long lines in test signatures with many fixtures
     "PLR0913",  # too many arguments in fixtures
+    "PLR0917",  # too many positional arguments
+    "PLC0415",  # import not at top-level
     "ARG001",   # unused function argument
     "ARG002",   # unused method argument
     "SLF001",   # private member access

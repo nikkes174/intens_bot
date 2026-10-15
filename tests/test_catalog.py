@@ -1,8 +1,9 @@
 """Tests for training catalog."""
-import pytest
+
 from decimal import Decimal
 
-from tgbot.db.repositories.training import TrainingRepository
+import pytest
+
 from tgbot.keyboards.inline import catalog_keyboard
 
 

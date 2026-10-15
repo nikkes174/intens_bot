@@ -1,10 +1,6 @@
 """Tests for YooKassa webhook endpoint."""
-import pytest
-import json
-from datetime import datetime
-from decimal import Decimal
-from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from bot import create_app
@@ -16,12 +12,16 @@ def app():
     config = Config(
         tg_bot=type("TgBot", (), {"token": "test", "admin_ids": [123]})(),
         db=type("DbConfig", (), {"url": "sqlite+aiosqlite:///test.db"})(),
-        yookassa=type("YooKassaConfig", (), {
-            "shop_id": "test",
-            "secret_key": "test",
-            "return_url": "https://t.me/",
-            "vat_code": 1,
-        })(),
+        yookassa=type(
+            "YooKassaConfig",
+            (),
+            {
+                "shop_id": "test",
+                "secret_key": "test",
+                "return_url": "https://t.me/",
+                "vat_code": 1,
+            },
+        )(),
         webhook=type("WebhookConfig", (), {"host": "0.0.0.0", "port": 8000})(),
         misc=type("Miscellaneous", (), {"log_level": "INFO"})(),
     )
@@ -54,8 +54,5 @@ def test_webhook_missing_event(client):
 
 def test_webhook_missing_payment_id(client):
     """Test webhook with missing payment_id."""
-    response = client.post("/webhooks/yookassa", json={
-        "event": "payment.succeeded",
-        "object": {}
-    })
+    response = client.post("/webhooks/yookassa", json={"event": "payment.succeeded", "object": {}})
     assert response.status_code == 400
