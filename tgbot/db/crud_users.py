@@ -1,5 +1,4 @@
 from datetime import date
-from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,8 +13,8 @@ class UserCrud:
     async def add_user(
         self,
         user_id: int,
-        user_name: Optional[str] = None,
-        create_date: Optional[date] = None,
+        user_name: str | None = None,
+        create_date: date | None = None,
     ):
         user = UserModel(
             user_id=user_id,
@@ -40,7 +39,7 @@ class UserCrud:
         return result.scalar_one_or_none()
 
     async def set_payment_pending(
-        self, user_id: int, user_name: Optional[str], payment_id: str
+        self, user_id: int, user_name: str | None, payment_id: str
     ) -> UserModel:
         user = await self.get_user(user_id)
         if user is None:
