@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
 
-from tgbot.config import Config
+from tgbot.config import CORE_PRODUCT_CODES, Config
 from tgbot.db.db import get_session_factory
 from tgbot.db.repositories.access import AccessRepository
 from tgbot.db.repositories.material import MaterialRepository
@@ -174,7 +174,16 @@ async def admin_training_detail(callback_query: types.CallbackQuery, config: Con
             await training_repo.get_bundle_components(training_id) if training.is_bundle else []
         )
 
-    group_status = "подключена" if training.telegram_chat_id else "не подключена"
+    if training.product_code in CORE_PRODUCT_CODES:
+        group_status = (
+            "подключена через .env"
+            if config.training_groups.get_training_chat_id(training.product_code)
+            else "не настроена"
+        )
+    elif training.is_bundle:
+        group_status = "группы программ берутся из .env"
+    else:
+        group_status = "подключена" if training.telegram_chat_id else "не подключена"
     status = "активна" if training.is_active else "скрыта"
 
     text = (
@@ -191,7 +200,10 @@ async def admin_training_detail(callback_query: types.CallbackQuery, config: Con
     await callback_query.message.edit_text(
         text,
         reply_markup=admin_training_detail_keyboard(
-            training_id, training.is_active, is_bundle=training.is_bundle
+            training_id,
+            training.is_active,
+            is_bundle=training.is_bundle,
+            is_env_group=training.product_code in CORE_PRODUCT_CODES,
         ),
     )
 
@@ -481,6 +493,12 @@ async def admin_link_group(callback_query: types.CallbackQuery, state: FSMContex
                 "Подключи отдельный канал к каждой программе комплекта."
             )
             return
+        if training.product_code in CORE_PRODUCT_CODES:
+            await callback_query.message.answer(
+                "Группа для этой программы настраивается через GLUTE_ID, V_SHARE_ID "
+                "или CORE_PROTOCOL_ID в .env."
+            )
+            return
     await state.set_state(AdminStates.waiting_for_chat_id)
     await state.update_data(training_id=training_id)
 
@@ -510,6 +528,14 @@ async def process_chat_id(message: Message, state: FSMContext, bot: Bot, config:
     session_factory = get_session_factory()
     async with session_factory() as session:
         training_repo = TrainingRepository(session)
+
+        training = await training_repo.get_by_id(training_id)
+        if not training:
+            await message.answer("Тренировка не найдена.")
+            return
+        if training.product_code in CORE_PRODUCT_CODES:
+            await message.answer("Группы основных программ настраиваются через переменные .env.")
+            return
 
         # Check if group is already linked to another training
         existing = await training_repo.get_by_chat_id(chat_id)

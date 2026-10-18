@@ -15,6 +15,7 @@ from tgbot.db.migrate import run_migrations
 from tgbot.db.seed import seed_products
 from tgbot.handlers import admin_router, user_router
 from tgbot.middlewares.config import ConfigMiddleware
+from tgbot.services.access import validate_training_groups
 from tgbot.services.outbox import OutboxProcessor
 from tgbot.services.scheduled import ScheduledMessageProcessor
 from tgbot.webhooks import yookassa_router
@@ -83,6 +84,7 @@ async def main():
     dp.include_router(user_router)
 
     register_global_middlewares(dp, config)
+    await validate_training_groups(bot, config.training_groups)
 
     # Webhook server
     app = create_app(config)
@@ -99,7 +101,13 @@ async def main():
 
     bot_task = asyncio.create_task(dp.start_polling(bot))
     server_task = asyncio.create_task(server.serve())
-    outbox_task = asyncio.create_task(OutboxProcessor(bot, config.tg_bot.admin_ids).start())
+    outbox_task = asyncio.create_task(
+        OutboxProcessor(
+            bot,
+            config.tg_bot.admin_ids,
+            config.training_groups,
+        ).start()
+    )
     scheduled_task = asyncio.create_task(ScheduledMessageProcessor(bot).start())
 
     logger.info("Bot started. Webhook server on port %d", config.webhook.port)

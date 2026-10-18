@@ -8,7 +8,9 @@ import pytest
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import CreateChatInviteLink
 
-from tgbot.config import Config
+from tgbot.config import Config, TrainingGroups
+from tgbot.db.seed import seed_products
+from tgbot.handlers.admin import admin_link_group, admin_training_detail
 
 
 @pytest.fixture
@@ -295,3 +297,68 @@ async def test_chatid_reports_join_request_link_api_failure(admin_config):
     assert "-1001234567890" not in message.answer.await_args.args[0]
     assert "Не удалось проверить" in message.answer.await_args.args[0]
     bot.revoke_chat_invite_link.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_core_training_admin_card_uses_env_status_and_hides_group_binding(
+    admin_config, training_repo
+):
+    await seed_products()
+    glute = await training_repo.get_by_code("glute")
+    await training_repo.update_chat_id(glute.id, -1001234567000)
+    admin_config.training_groups = TrainingGroups(glute_id=-1001234567890)
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=123456789),
+        data=f"admin_training_{glute.id}",
+        answer=AsyncMock(),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+    )
+
+    await admin_training_detail(callback, admin_config)
+
+    text = callback.message.edit_text.await_args.args[0]
+    markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+    callback_data = [
+        button.callback_data
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data
+    ]
+    assert "Группа: подключена через .env" in text
+    assert not any(value.startswith("admin_link_group_") for value in callback_data)
+
+
+@pytest.mark.asyncio
+async def test_core_training_admin_card_does_not_trust_legacy_db_group(admin_config, training_repo):
+    await seed_products()
+    glute = await training_repo.get_by_code("glute")
+    await training_repo.update_chat_id(glute.id, -1001234567000)
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=123456789),
+        data=f"admin_training_{glute.id}",
+        answer=AsyncMock(),
+        message=SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock()),
+    )
+
+    await admin_training_detail(callback, admin_config)
+
+    text = callback.message.edit_text.await_args.args[0]
+    assert "Группа: не настроена" in text
+
+
+@pytest.mark.asyncio
+async def test_admin_cannot_link_core_training_with_legacy_callback(admin_config, training_repo):
+    await seed_products()
+    glute = await training_repo.get_by_code("glute")
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=123456789),
+        data=f"admin_link_group_{glute.id}",
+        answer=AsyncMock(),
+        message=SimpleNamespace(answer=AsyncMock()),
+    )
+    state = SimpleNamespace(set_state=AsyncMock(), update_data=AsyncMock())
+
+    await admin_link_group(callback, state, admin_config)
+
+    callback.message.answer.assert_awaited_once()
+    state.set_state.assert_not_called()

@@ -3,11 +3,10 @@
 import asyncio
 from pathlib import Path
 
+from alembic import command
 from alembic.config import Config
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import create_async_engine
-
-from alembic import command
 
 
 def run_migrations(database_url: str) -> None:

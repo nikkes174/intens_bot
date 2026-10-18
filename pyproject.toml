@@ -37,6 +37,10 @@ ignore = [
     "AIR001",  # flask-like code
 ]
 
+[tool.ruff.lint.isort]
+# The repository's Alembic migration directory is not the installed alembic package.
+known-third-party = ["alembic"]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = [
     "E501",     # long lines in test signatures with many fixtures

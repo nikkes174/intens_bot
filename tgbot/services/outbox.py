@@ -5,6 +5,7 @@ import logging
 
 from aiogram import Bot
 
+from tgbot.config import TrainingGroups
 from tgbot.db.db import get_session_factory
 from tgbot.db.repositories.delivery import DeliveryRepository
 from tgbot.db.repositories.invite import InviteRepository
@@ -27,9 +28,15 @@ logger = logging.getLogger(__name__)
 
 
 class OutboxProcessor:
-    def __init__(self, bot: Bot, admin_ids: list[int] | None = None):
+    def __init__(
+        self,
+        bot: Bot,
+        admin_ids: list[int] | None = None,
+        training_groups: TrainingGroups | None = None,
+    ):
         self.bot = bot
         self.admin_ids = admin_ids or []
+        self.training_groups = training_groups or TrainingGroups()
         self._running = False
 
     async def start(self) -> None:
@@ -72,6 +79,7 @@ class OutboxProcessor:
             material_repo = MaterialRepository(session)
             delivery_repo = DeliveryRepository(session)
             invite_repo = InviteRepository(session)
+            access_service = AccessService(self.bot, self.training_groups)
             if not user or not order:
                 raise RuntimeError("Purchase user or order is missing")
 
@@ -101,7 +109,7 @@ class OutboxProcessor:
                 ]
                 if not product or not sendable_materials:
                     missing_materials.append(product.title if product else f"#{training_id}")
-                if not product or not product.telegram_chat_id:
+                if not product or access_service.get_training_chat_id(product) is None:
                     missing_channels.append(product.title if product else f"#{training_id}")
 
             if order.delivery_status == "pending":
@@ -132,11 +140,10 @@ class OutboxProcessor:
                 if result.get("failed"):
                     delivery_failed = True
 
-            access_service = AccessService(self.bot)
             invite_failed = False
             for training_id in training_ids:
                 product = await training_repo.get_by_id(training_id)
-                if not product or not product.telegram_chat_id:
+                if not product or access_service.get_training_chat_id(product) is None:
                     continue
                 invite_link = await access_service.create_invite_link(
                     user.id,

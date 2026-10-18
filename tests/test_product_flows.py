@@ -10,7 +10,7 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramServerError
 from aiogram.methods import SendMessage
 from sqlalchemy import select
 
-from tgbot.config import YooKassaConfig
+from tgbot.config import TrainingGroups, YooKassaConfig
 from tgbot.db.db import get_session_factory
 from tgbot.db.models import OutboxEventModel
 from tgbot.db.repositories.scheduled import ScheduledMessageRepository
@@ -135,8 +135,10 @@ async def test_bundle_success_outbox_sends_all_materials_and_channel_invites(
     await seed_products()
     bundle = await training_repo.get_by_code("bundle_all")
     component_ids = await training_repo.get_component_ids(bundle.id)
+    group_ids = (-1009000000001, -1009000000002, -1009000000003)
     for index, training_id in enumerate(component_ids, 1):
-        await training_repo.update_chat_id(training_id, -1009000000000 - index)
+        # Stale DB IDs must not override the current .env mapping.
+        await training_repo.update_chat_id(training_id, -1008000000000 - index)
         await material_repo.create(
             training_id=training_id,
             material_type="pdf",
@@ -156,6 +158,9 @@ async def test_bundle_success_outbox_sends_all_materials_and_channel_invites(
     bot.create_chat_invite_link.side_effect = [
         SimpleNamespace(invite_link=f"https://t.me/+bundle{index}") for index in range(1, 4)
     ]
+    training_groups = TrainingGroups(
+        glute_id=group_ids[0], v_share_id=group_ids[1], core_protocol_id=group_ids[2]
+    )
     with patch.object(
         payment_service,
         "get_payment_status",
@@ -171,10 +176,16 @@ async def test_bundle_success_outbox_sends_all_materials_and_channel_invites(
             training_repo=training_repo,
         )
 
-    await OutboxProcessor(bot).process_events()
+    await OutboxProcessor(bot, training_groups=training_groups).process_events()
 
     assert bot.send_document.await_count == 3
     assert bot.create_chat_invite_link.await_count == 3
+    assert [call.kwargs["chat_id"] for call in bot.create_chat_invite_link.await_args_list] == list(
+        group_ids
+    )
+    assert all(
+        call.kwargs["creates_join_request"] for call in bot.create_chat_invite_link.await_args_list
+    )
     assert bot.send_message.await_count == 4
     assert {
         access.training_id for access in await access_repo.get_user_accesses(sample_user.id)
@@ -324,6 +335,11 @@ async def test_bundle_owner_can_regenerate_all_three_channel_invites(
     for index, training_id in enumerate(component_ids, 1):
         await access_repo.grant_access(sample_user.id, training_id)
         await training_repo.update_chat_id(training_id, -1000000000000 - index)
+    training_groups = TrainingGroups(
+        glute_id=-1009100000001,
+        v_share_id=-1009100000002,
+        core_protocol_id=-1009100000003,
+    )
 
     bot = AsyncMock()
     bot.create_chat_invite_link.side_effect = [
@@ -331,10 +347,15 @@ async def test_bundle_owner_can_regenerate_all_three_channel_invites(
     ]
     callback = make_callback(sample_user.telegram_user_id, f"join_group_{bundle.id}")
 
-    await join_group(callback, bot)
+    await join_group(callback, bot, SimpleNamespace(training_groups=training_groups))
 
     assert bot.create_chat_invite_link.await_count == 3
     assert callback.message.answer.await_count == 3
+    assert [call.kwargs["chat_id"] for call in bot.create_chat_invite_link.await_args_list] == [
+        training_groups.glute_id,
+        training_groups.v_share_id,
+        training_groups.core_protocol_id,
+    ]
 
 
 @pytest.mark.asyncio

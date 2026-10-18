@@ -11,6 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ChatJoinRequest, Message
 
+from tgbot.config import Config
 from tgbot.db.db import get_session_factory
 from tgbot.db.repositories.access import AccessRepository
 from tgbot.db.repositories.delivery import DeliveryRepository
@@ -620,7 +621,7 @@ async def get_materials(callback_query: types.CallbackQuery, bot: Bot):
 
 
 @user_router.callback_query(F.data.startswith("join_group_"))
-async def join_group(callback_query: types.CallbackQuery, bot: Bot):
+async def join_group(callback_query: types.CallbackQuery, bot: Bot, config: Config):
     await callback_query.answer()
     training_id = int(callback_query.data.removeprefix("join_group_"))
     session_factory = get_session_factory()
@@ -640,7 +641,7 @@ async def join_group(callback_query: types.CallbackQuery, bot: Bot):
             product_ids = component_ids
         else:
             product_ids = [training_id]
-        access_service = AccessService(bot)
+        access_service = AccessService(bot, config.training_groups)
         invite_repo = InviteRepository(session)
         for product_id in product_ids:
             if not await access_repo.has_active_access(user.id, product_id):
@@ -768,7 +769,7 @@ async def legacy_training(callback_query: types.CallbackQuery):
 
 
 @user_router.chat_join_request()
-async def handle_join_request(join_request: ChatJoinRequest, bot: Bot):
+async def handle_join_request(join_request: ChatJoinRequest, bot: Bot, config: Config):
     session_factory = get_session_factory()
     async with session_factory() as session:
         user_repo = UserRepository(session)
@@ -777,7 +778,7 @@ async def handle_join_request(join_request: ChatJoinRequest, bot: Bot):
             return
         access_repo = AccessRepository(session)
         training_repo = TrainingRepository(session)
-        access_service = AccessService(bot)
+        access_service = AccessService(bot, config.training_groups)
         approved = await access_service.handle_join_request(
             user.id,
             join_request.chat.id,

@@ -189,7 +189,10 @@ def admin_trainings_keyboard(trainings: list[TrainingModel]) -> InlineKeyboardMa
 
 
 def admin_training_detail_keyboard(
-    training_id: int, is_active: bool, is_bundle: bool = False
+    training_id: int,
+    is_active: bool,
+    is_bundle: bool = False,
+    is_env_group: bool = False,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Изменить название", callback_data=f"admin_edit_title_{training_id}")
@@ -199,7 +202,10 @@ def admin_training_detail_keyboard(
         builder.button(
             text="📂 Управление материалами", callback_data=f"admin_materials_{training_id}"
         )
-        builder.button(text="🔗 Привязать группу", callback_data=f"admin_link_group_{training_id}")
+        if not is_env_group:
+            builder.button(
+                text="🔗 Привязать группу", callback_data=f"admin_link_group_{training_id}"
+            )
     if is_active:
         builder.button(text="🔴 Скрыть тренировку", callback_data=f"admin_hide_{training_id}")
     else:
