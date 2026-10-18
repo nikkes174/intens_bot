@@ -24,6 +24,7 @@ from tgbot.handlers.handlers_texts import (
     ACCESS_HANDLER,
     BUY_TEXT,
     CATALOG_TEXT,
+    DISCOUNT_NOT_AVAILABLE_TEXT,
     DISCOUNT_OFFER_TEXT,
     EMPTY_PURCHASES_TEXT,
     FAQ_TEXT,
@@ -46,8 +47,9 @@ from tgbot.keyboards.inline import (
 )
 from tgbot.services.access import AccessService
 from tgbot.services.delivery import DeliveryService
+from tgbot.services.discounts import check_discount_eligibility
 from tgbot.services.payment import PaymentService
-from tgbot.services.pricing import discounted_items, format_money, quantize_money
+from tgbot.services.pricing import format_money, quantize_money
 
 logger = logging.getLogger(__name__)
 
@@ -88,30 +90,31 @@ def _format_product_card(training) -> str:
 async def _show_discount_offer(callback_query: types.CallbackQuery) -> None:
     session_factory = get_session_factory()
     async with session_factory() as session:
-        _, owned_ids = await _get_user_and_owned_ids(
+        user, _ = await _get_user_and_owned_ids(
             session, callback_query.from_user.id, callback_query.from_user.username
         )
-        training_repo = TrainingRepository(session)
-        missing = []
-        for code in ("glute", "vshape", "core"):
-            product = await training_repo.get_by_code(code)
-            if product and product.is_active and product.id not in owned_ids:
-                missing.append(product)
+        eligibility = await check_discount_eligibility(
+            user.id,
+            access_repo=AccessRepository(session),
+            order_repo=OrderRepository(session),
+            training_repo=TrainingRepository(session),
+        )
 
-        priced = [(item.id, item.title, Decimal(item.price)) for item in missing]
-        total, _, _ = discounted_items(priced)
-
-    if not missing:
+    if not eligibility.available:
+        if eligibility.reason == "all_programs_owned":
+            text = "У тебя уже есть все три программы 💪"
+        else:
+            text = DISCOUNT_NOT_AVAILABLE_TEXT
         await callback_query.message.edit_text(
-            "У тебя уже есть все три программы 💪",
-            reply_markup=purchases_keyboard([]),
+            text,
+            reply_markup=main_menu_keyboard(),
         )
         return
 
-    text = DISCOUNT_OFFER_TEXT.format(price=format_money(total))
+    text = DISCOUNT_OFFER_TEXT.format(price=format_money(eligibility.total))
     await callback_query.message.edit_text(
         text,
-        reply_markup=discount_offer_keyboard(format_money(total)),
+        reply_markup=discount_offer_keyboard(format_money(eligibility.total)),
     )
 
 
@@ -121,14 +124,15 @@ async def _resolve_checkout(session, user_id: int, selection: dict):
     owned = {access.training_id for access in await access_repo.get_user_accesses(user_id)}
 
     if selection.get("kind") == "discount":
-        items = []
-        for code in ("glute", "vshape", "core"):
-            product = await training_repo.get_by_code(code)
-            if product and product.is_active and product.id not in owned:
-                items.append((product.id, product.title, Decimal(product.price)))
-        if not items:
+        eligibility = await check_discount_eligibility(
+            user_id,
+            access_repo=access_repo,
+            order_repo=OrderRepository(session),
+            training_repo=training_repo,
+        )
+        if not eligibility.available:
             return None
-        total, discount_amount, lines = discounted_items(items)
+        lines = eligibility.lines
         selected_ids = ",".join(str(line["training_id"]) for line in lines)
         return {
             "anchor_id": lines[0]["training_id"],
@@ -142,9 +146,9 @@ async def _resolve_checkout(session, user_id: int, selection: dict):
                 }
                 for line in lines
             ],
-            "amount": total,
+            "amount": eligibility.total,
             "discount_percent": Decimal("20.00"),
-            "discount_amount": discount_amount,
+            "discount_amount": eligibility.discount_amount,
             "description": "Персональное предложение на оставшиеся программы со скидкой 20%",
         }
 
@@ -224,6 +228,7 @@ async def _create_or_resume_payment(
             payment_id, payment_url = await payment_service.create_payment(
                 user_id=user.id,
                 training_id=order.training_id,
+                order_id=order.id,
                 email=email,
                 amount=order.amount,
                 currency=order.currency,
@@ -337,9 +342,17 @@ async def buy_discount_offer(callback_query: types.CallbackQuery, state: FSMCont
         user, _ = await _get_user_and_owned_ids(
             session, callback_query.from_user.id, callback_query.from_user.username
         )
+        selection = {"kind": "discount"}
+        checkout = await _resolve_checkout(session, user.id, selection)
         has_email = bool(user.email)
 
-    selection = {"kind": "discount"}
+    if not checkout:
+        await callback_query.message.edit_text(
+            DISCOUNT_NOT_AVAILABLE_TEXT,
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
     if not has_email:
         await state.set_state(PaymentStates.waiting_for_email)
         await state.update_data(selection=selection)
@@ -564,8 +577,14 @@ async def get_materials(callback_query: types.CallbackQuery, bot: Bot):
         component_ids = await training_repo.get_component_ids(training_id)
         has_access = await access_repo.has_active_access(user.id, training_id)
         if training.is_bundle:
-            has_access = has_access or all(
-                [await access_repo.has_active_access(user.id, item_id) for item_id in component_ids]
+            has_access = has_access or (
+                bool(component_ids)
+                and all(
+                    [
+                        await access_repo.has_active_access(user.id, item_id)
+                        for item_id in component_ids
+                    ]
+                )
             )
         elif not has_access:
             await callback_query.message.answer("У тебя нет доступа к этой программе.")
@@ -590,6 +609,7 @@ async def get_materials(callback_query: types.CallbackQuery, bot: Bot):
                 delivery_repo,
                 material_repo,
                 training_repo,
+                force_resend=True,
             )
 
     if not available:

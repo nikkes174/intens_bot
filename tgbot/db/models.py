@@ -124,6 +124,9 @@ class OrderModel(Base):
     )  # pending, succeeded, canceled
     customer_email: Mapped[str | None] = mapped_column(String(255))
     idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payment_metadata_version: Mapped[str | None] = mapped_column(
+        String(8), nullable=True, default="v2"
+    )
     checkout_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     payment_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     delivery_status: Mapped[str] = mapped_column(
@@ -308,6 +311,7 @@ class ScheduledMessageModel(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

@@ -20,6 +20,23 @@ from tgbot.db.repositories.user import UserRepository
 logger = logging.getLogger(__name__)
 
 
+def _metadata_to_dict(metadata) -> dict:
+    if metadata is None:
+        return {}
+    if isinstance(metadata, dict):
+        return {str(key): value for key, value in metadata.items()}
+    if hasattr(metadata, "to_dict"):
+        converted = metadata.to_dict()
+        if isinstance(converted, dict):
+            return {str(key): value for key, value in converted.items()}
+    try:
+        return {
+            str(key): value for key, value in vars(metadata).items() if not str(key).startswith("_")
+        }
+    except TypeError:
+        return {}
+
+
 class PaymentService:
     def __init__(self, config: YooKassaConfig):
         self.config = config
@@ -38,6 +55,7 @@ class PaymentService:
         self,
         user_id: int,
         training_id: int,
+        order_id: int,
         email: str,
         amount: Decimal,
         currency: str = "RUB",
@@ -68,6 +86,8 @@ class PaymentService:
             "metadata": {
                 "user_id": str(user_id),
                 "training_id": str(training_id),
+                "order_id": str(order_id),
+                "metadata_version": "2",
                 "idempotency_key": idempotency_key,
             },
             "receipt": {
@@ -103,7 +123,7 @@ class PaymentService:
                 "status": payment.status,
                 "amount": payment.amount.value,
                 "currency": payment.amount.currency,
-                "metadata": payment.metadata or {},
+                "metadata": _metadata_to_dict(payment.metadata),
             }
         except NotFoundError:
             logger.warning("Payment %s not found in YooKassa", payment_id)
@@ -130,25 +150,14 @@ class PaymentService:
             return False
 
         already_succeeded = order.status == "succeeded"
-        if not already_succeeded:
-            # A webhook is only a notification; ask YooKassa for the authoritative state.
-            payment_info = await self.get_payment_status(payment_id)
-            if not payment_info or payment_info["status"] != "succeeded":
-                logger.warning("Payment %s is not confirmed as succeeded", payment_id)
-                return False
+        # Webhooks are notifications only: always verify authoritative payment data.
+        payment_info = await self.get_payment_status(payment_id)
+        if not payment_info or payment_info.get("status") != "succeeded":
+            logger.warning("Payment %s is not confirmed as succeeded", payment_id)
+            return False
 
-            if Decimal(str(payment_info["amount"])).quantize(Decimal("0.01")) != order.amount:
-                logger.error(
-                    "Amount mismatch for payment %s: expected %s, got %s",
-                    payment_id,
-                    order.amount,
-                    payment_info["amount"],
-                )
-                return False
-
-            if payment_info["currency"] != order.currency:
-                logger.error("Currency mismatch for payment %s", payment_id)
-                return False
+        if not self._verified_payment_matches_order(order, payment_id, payment_info):
+            return False
 
         order_items = await order_repo.get_order_items(order.id)
         purchased_ids = [item.training_id for item in order_items] or [order.training_id]
@@ -206,6 +215,57 @@ class PaymentService:
                     )
 
         logger.info("Payment %s processed successfully for order %s", payment_id, order.id)
+        return True
+
+    @staticmethod
+    def _verified_payment_matches_order(order, payment_id: str, payment_info: dict) -> bool:
+        if payment_info.get("id") != payment_id or order.payment_id != payment_id:
+            logger.error("Payment id mismatch for order %s", order.id)
+            return False
+
+        try:
+            amount = Decimal(str(payment_info.get("amount"))).quantize(Decimal("0.01"))
+        except Exception:
+            logger.error("Invalid amount returned by YooKassa for order %s", order.id)
+            return False
+        if amount != order.amount:
+            logger.error("Amount mismatch for payment %s and order %s", payment_id, order.id)
+            return False
+        if payment_info.get("currency") != order.currency:
+            logger.error("Currency mismatch for payment %s and order %s", payment_id, order.id)
+            return False
+
+        metadata = _metadata_to_dict(payment_info.get("metadata"))
+        expected = {
+            "user_id": str(order.user_id),
+            "training_id": str(order.training_id),
+        }
+        if order.payment_metadata_version == "v2":
+            expected.update(
+                {
+                    "order_id": str(order.id),
+                    "metadata_version": "2",
+                }
+            )
+        elif metadata.get("order_id") is not None:
+            # Legacy orders are accepted only by their persisted payment_id and the
+            # metadata fields that the old payment creator already supplied.
+            expected["order_id"] = str(order.id)
+
+        if order.idempotency_key:
+            expected["idempotency_key"] = order.idempotency_key
+
+        mismatched = [
+            field for field, value in expected.items() if str(metadata.get(field, "")) != value
+        ]
+        if mismatched:
+            logger.error(
+                "YooKassa metadata mismatch for payment %s/order %s: %s",
+                payment_id,
+                order.id,
+                ", ".join(mismatched),
+            )
+            return False
         return True
 
     async def process_payment_canceled(

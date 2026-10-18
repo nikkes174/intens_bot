@@ -191,6 +191,97 @@ async def test_repeat_delivery_works(
 
 
 @pytest.mark.asyncio
+async def test_force_resend_sends_sent_material_without_resetting_history(
+    delivery_service,
+    mock_bot,
+    delivery_repo,
+    material_repo,
+    training_repo,
+    sample_user,
+    sample_training,
+):
+    material = await material_repo.create(
+        training_id=sample_training.id,
+        material_type="pdf",
+        telegram_file_id="pdf_123",
+        file_name="program.pdf",
+        sort_order=1,
+    )
+    await delivery_service.deliver_materials(
+        sample_user.id,
+        sample_training.id,
+        delivery_repo,
+        material_repo,
+        training_repo,
+    )
+    prior = await delivery_repo.get_delivery(sample_user.id, material.id)
+    original_sent_at = prior.sent_at
+
+    result = await delivery_service.deliver_materials(
+        sample_user.id,
+        sample_training.id,
+        delivery_repo,
+        material_repo,
+        training_repo,
+        force_resend=True,
+    )
+
+    refreshed = await delivery_repo.get_delivery(sample_user.id, material.id)
+    assert result["delivered"] == 1
+    assert mock_bot.send_document.await_count == 2
+    assert refreshed.status == "sent"
+    assert refreshed.sent_at == original_sent_at
+
+
+@pytest.mark.asyncio
+async def test_force_resend_includes_materials_added_after_purchase(
+    delivery_service,
+    mock_bot,
+    delivery_repo,
+    material_repo,
+    training_repo,
+    sample_user,
+    sample_training,
+):
+    first = await material_repo.create(
+        training_id=sample_training.id,
+        material_type="video",
+        telegram_file_id="video_1",
+        file_name="first.mp4",
+        sort_order=1,
+    )
+    await delivery_service.deliver_materials(
+        sample_user.id,
+        sample_training.id,
+        delivery_repo,
+        material_repo,
+        training_repo,
+    )
+    second = await material_repo.create(
+        training_id=sample_training.id,
+        material_type="pdf",
+        telegram_file_id="pdf_2",
+        file_name="new.pdf",
+        sort_order=2,
+    )
+
+    result = await delivery_service.deliver_materials(
+        sample_user.id,
+        sample_training.id,
+        delivery_repo,
+        material_repo,
+        training_repo,
+        force_resend=True,
+    )
+
+    assert result["delivered"] == 2
+    assert mock_bot.send_video.await_count == 2
+    assert mock_bot.send_document.await_count == 1
+    assert (await delivery_repo.get_delivery(sample_user.id, first.id)).status == "sent"
+    assert (await delivery_repo.get_delivery(sample_user.id, second.id)).status == "sent"
+
+
+@pytest.mark.asyncio
 async def test_telegram_api_error_no_access_loss(
     delivery_service,
     mock_bot,

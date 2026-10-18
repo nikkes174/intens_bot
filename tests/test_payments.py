@@ -9,6 +9,22 @@ from tgbot.config import YooKassaConfig
 from tgbot.services.payment import PaymentService
 
 
+def verified_payment(order, payment_id, *, amount=None, currency="RUB", metadata=None):
+    return {
+        "id": payment_id,
+        "status": "succeeded",
+        "amount": str(order.amount if amount is None else amount),
+        "currency": currency,
+        "metadata": metadata
+        or {
+            "user_id": str(order.user_id),
+            "training_id": str(order.training_id),
+            "order_id": str(order.id),
+            "metadata_version": "2",
+        },
+    }
+
+
 @pytest.fixture
 def yookassa_config():
     return YooKassaConfig(
@@ -36,12 +52,15 @@ async def test_create_payment(payment_service):
         payment_id, url = await payment_service.create_payment(
             user_id=1,
             training_id=1,
+            order_id=42,
             email="test@example.com",
             amount=Decimal("990.00"),
         )
 
         assert payment_id == "payment_123"
         assert "yoomoney" in url
+        assert mock_create.call_args.args[0]["metadata"]["order_id"] == "42"
+        assert mock_create.call_args.args[0]["metadata"]["metadata_version"] == "2"
 
 
 @pytest.mark.asyncio
@@ -49,7 +68,7 @@ async def test_successful_payment_processing(
     payment_service, order_repo, access_repo, sample_user, sample_training
 ):
     """Test processing a successful payment."""
-    await order_repo.create(
+    order = await order_repo.create(
         user_id=sample_user.id,
         training_id=sample_training.id,
         amount=Decimal("990.00"),
@@ -57,12 +76,7 @@ async def test_successful_payment_processing(
     )
 
     with patch.object(payment_service, "get_payment_status") as mock_status:
-        mock_status.return_value = {
-            "id": "payment_123",
-            "status": "succeeded",
-            "amount": "990.00",
-            "currency": "RUB",
-        }
+        mock_status.return_value = verified_payment(order, "payment_123")
 
         result = await payment_service.process_payment_succeeded(
             "payment_123",
@@ -139,12 +153,7 @@ async def test_duplicate_webhook_ignored(
     await access_repo.grant_access(sample_user.id, sample_training.id, order.id)
 
     with patch.object(payment_service, "get_payment_status") as mock_status:
-        mock_status.return_value = {
-            "id": "payment_123",
-            "status": "succeeded",
-            "amount": "990.00",
-            "currency": "RUB",
-        }
+        mock_status.return_value = verified_payment(order, "payment_123")
 
         result = await payment_service.process_payment_succeeded(
             "payment_123",
@@ -169,7 +178,7 @@ async def test_amount_mismatch_rejected(
     payment_service, order_repo, access_repo, sample_user, sample_training
 ):
     """Test that payment with wrong amount is rejected."""
-    await order_repo.create(
+    order = await order_repo.create(
         user_id=sample_user.id,
         training_id=sample_training.id,
         amount=Decimal("990.00"),
@@ -177,12 +186,7 @@ async def test_amount_mismatch_rejected(
     )
 
     with patch.object(payment_service, "get_payment_status") as mock_status:
-        mock_status.return_value = {
-            "id": "payment_123",
-            "status": "succeeded",
-            "amount": "500.00",  # Wrong amount
-            "currency": "RUB",
-        }
+        mock_status.return_value = verified_payment(order, "payment_123", amount="500.00")
 
         result = await payment_service.process_payment_succeeded(
             "payment_123",
@@ -202,7 +206,7 @@ async def test_currency_mismatch_rejected(
     payment_service, order_repo, access_repo, sample_user, sample_training
 ):
     """Test that payment with wrong currency is rejected."""
-    await order_repo.create(
+    order = await order_repo.create(
         user_id=sample_user.id,
         training_id=sample_training.id,
         amount=Decimal("990.00"),
@@ -211,12 +215,7 @@ async def test_currency_mismatch_rejected(
     )
 
     with patch.object(payment_service, "get_payment_status") as mock_status:
-        mock_status.return_value = {
-            "id": "payment_123",
-            "status": "succeeded",
-            "amount": "990.00",
-            "currency": "USD",  # Wrong currency
-        }
+        mock_status.return_value = verified_payment(order, "payment_123", currency="USD")
 
         result = await payment_service.process_payment_succeeded(
             "payment_123",
@@ -229,6 +228,112 @@ async def test_currency_mismatch_rejected(
         )
 
         assert result is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata_field", ["user_id", "training_id", "order_id", "missing_order_id"]
+)
+async def test_metadata_mismatch_rejects_payment(
+    metadata_field,
+    payment_service,
+    order_repo,
+    access_repo,
+    sample_user,
+    sample_training,
+):
+    order = await order_repo.create(
+        user_id=sample_user.id,
+        training_id=sample_training.id,
+        amount=Decimal("990.00"),
+        payment_id="payment_metadata",
+    )
+    metadata = verified_payment(order, "payment_metadata")["metadata"]
+    if metadata_field == "missing_order_id":
+        metadata.pop("order_id")
+    else:
+        metadata[metadata_field] = "999999"
+
+    with patch.object(
+        payment_service,
+        "get_payment_status",
+        return_value=verified_payment(order, "payment_metadata", metadata=metadata),
+    ):
+        result = await payment_service.process_payment_succeeded(
+            "payment_metadata",
+            bot=AsyncMock(),
+            order_repo=order_repo,
+            access_repo=access_repo,
+            outbox_repo=AsyncMock(),
+            user_repo=AsyncMock(),
+            training_repo=AsyncMock(),
+        )
+
+    assert result is False
+    assert not await access_repo.has_active_access(sample_user.id, sample_training.id)
+
+
+@pytest.mark.asyncio
+async def test_yookassa_payment_id_must_match_authoritative_response(
+    payment_service, order_repo, access_repo, sample_user, sample_training
+):
+    order = await order_repo.create(
+        user_id=sample_user.id,
+        training_id=sample_training.id,
+        amount=Decimal("990.00"),
+        payment_id="payment_metadata",
+    )
+    info = verified_payment(order, "payment_metadata")
+    info["id"] = "different-payment"
+    with patch.object(payment_service, "get_payment_status", return_value=info):
+        result = await payment_service.process_payment_succeeded(
+            "payment_metadata",
+            bot=AsyncMock(),
+            order_repo=order_repo,
+            access_repo=access_repo,
+            outbox_repo=AsyncMock(),
+            user_repo=AsyncMock(),
+            training_repo=AsyncMock(),
+        )
+
+    assert result is False
+    assert not await access_repo.has_active_access(sample_user.id, sample_training.id)
+
+
+@pytest.mark.asyncio
+async def test_legacy_payment_metadata_is_verified_against_saved_payment_link(
+    payment_service, order_repo, access_repo, sample_user, sample_training, training_repo
+):
+    order = await order_repo.create(
+        user_id=sample_user.id,
+        training_id=sample_training.id,
+        amount=Decimal("990.00"),
+        payment_id="legacy-payment",
+        idempotency_key="old-idempotency-key",
+        payment_metadata_version="legacy",
+    )
+    legacy_metadata = {
+        "user_id": str(sample_user.id),
+        "training_id": str(sample_training.id),
+        "idempotency_key": "old-idempotency-key",
+    }
+    with patch.object(
+        payment_service,
+        "get_payment_status",
+        return_value=verified_payment(order, "legacy-payment", metadata=legacy_metadata),
+    ):
+        result = await payment_service.process_payment_succeeded(
+            "legacy-payment",
+            bot=AsyncMock(),
+            order_repo=order_repo,
+            access_repo=access_repo,
+            outbox_repo=AsyncMock(),
+            user_repo=AsyncMock(),
+            training_repo=training_repo,
+        )
+
+    assert result is True
+    assert await access_repo.has_active_access(sample_user.id, sample_training.id)
 
 
 @pytest.mark.asyncio

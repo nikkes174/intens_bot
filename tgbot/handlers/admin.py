@@ -1,8 +1,10 @@
 import html
 import logging
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from aiogram import Bot, F, Router, types
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -15,6 +17,12 @@ from tgbot.db.repositories.material import MaterialRepository
 from tgbot.db.repositories.order import OrderRepository
 from tgbot.db.repositories.training import TrainingRepository
 from tgbot.db.repositories.user import UserRepository
+from tgbot.handlers.handlers_texts import (
+    CHAT_ID_ADMIN_ONLY_TEXT,
+    CHAT_ID_LINK_ERROR_TEXT,
+    CHAT_ID_PERMISSION_ERROR_TEXT,
+    CHAT_ID_PRIVATE_TEXT,
+)
 from tgbot.keyboards.inline import (
     admin_back_keyboard,
     admin_material_actions_keyboard,
@@ -42,6 +50,59 @@ class AdminStates(StatesGroup):
 
 def is_admin(user_id: int, config: Config) -> bool:
     return user_id in config.tg_bot.admin_ids
+
+
+@admin_router.message(Command("chatid"))
+async def chat_id(message: Message, bot: Bot, config: Config):
+    if not is_admin(message.from_user.id, config):
+        await message.answer(CHAT_ID_ADMIN_ONLY_TEXT)
+        return
+    if message.chat.type == "private":
+        await message.answer(CHAT_ID_PRIVATE_TEXT)
+        return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer(CHAT_ID_PRIVATE_TEXT)
+        return
+
+    try:
+        bot_member = await bot.get_chat_member(message.chat.id, bot.id)
+    except TelegramAPIError:
+        await message.answer(CHAT_ID_PERMISSION_ERROR_TEXT)
+        return
+
+    is_bot_admin = bot_member.status in {"administrator", "creator"}
+    can_invite = bot_member.status == "creator" or bool(
+        getattr(bot_member, "can_invite_users", False)
+    )
+    if not is_bot_admin or not can_invite:
+        await message.answer(CHAT_ID_PERMISSION_ERROR_TEXT)
+        return
+
+    invite_link = None
+    try:
+        probe = await bot.create_chat_invite_link(
+            chat_id=message.chat.id,
+            name="chatid-permission-check",
+            creates_join_request=True,
+            expire_date=datetime.utcnow() + timedelta(minutes=1),
+        )
+        invite_link = probe.invite_link
+        await bot.revoke_chat_invite_link(
+            chat_id=message.chat.id,
+            invite_link=invite_link,
+        )
+    except TelegramAPIError:
+        logger.exception(
+            "Could not verify join-request invite-link support for chat %s", message.chat.id
+        )
+        await message.answer(CHAT_ID_LINK_ERROR_TEXT)
+        return
+
+    await message.answer(
+        "🆔 ID этой группы:\n\n"
+        f"{message.chat.id}\n\n"
+        "Скопируйте этот ID и укажите его в административной панели."
+    )
 
 
 @admin_router.message(Command("admin"))

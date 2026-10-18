@@ -26,8 +26,9 @@ class DeliveryService:
         delivery_repo: DeliveryRepository,
         material_repo: MaterialRepository,
         training_repo: TrainingRepository,
+        force_resend: bool = False,
     ) -> dict:
-        """Deliver all materials for a training to a user."""
+        """Deliver materials, or resend them without changing prior delivery history."""
         training = await training_repo.get_by_id(training_id)
         if not training:
             logger.error("Training %s not found", training_id)
@@ -42,20 +43,20 @@ class DeliveryService:
         failed = 0
 
         for material in materials:
-            # Check if already sent
             existing = await delivery_repo.get_delivery(user_id, material.id)
-            if existing and existing.status == "sent":
+            if existing and existing.status == "sent" and not force_resend:
                 continue
 
-            # Create delivery record if not exists
+            preserve_sent_history = bool(force_resend and existing and existing.status == "sent")
+
             if not existing:
                 existing = await delivery_repo.create(user_id, training_id, material.id)
 
-            # Send with retries
             for attempt in range(self.MAX_RETRIES):
                 try:
                     await self._send_material(user_id, material)
-                    await delivery_repo.mark_sent(existing.id)
+                    if not preserve_sent_history:
+                        await delivery_repo.mark_sent(existing.id)
                     delivered += 1
                     break
                 except TelegramAPIError as e:
@@ -70,7 +71,8 @@ class DeliveryService:
                     if attempt < self.MAX_RETRIES - 1:
                         await asyncio.sleep(self.RETRY_DELAY)
                     else:
-                        await delivery_repo.mark_failed(existing.id, str(e))
+                        if not preserve_sent_history:
+                            await delivery_repo.mark_failed(existing.id, str(e))
                         failed += 1
                 except Exception as e:
                     logger.exception(
@@ -79,7 +81,8 @@ class DeliveryService:
                         user_id,
                         e,
                     )
-                    await delivery_repo.mark_failed(existing.id, str(e))
+                    if not preserve_sent_history:
+                        await delivery_repo.mark_failed(existing.id, str(e))
                     failed += 1
                     break
 

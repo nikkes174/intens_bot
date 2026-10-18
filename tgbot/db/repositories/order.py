@@ -31,6 +31,7 @@ class OrderRepository(BaseRepository):
         checkout_key: str | None = None,
         discount_percent: Decimal | float = Decimal("0.00"),
         discount_amount: Decimal | float = Decimal("0.00"),
+        payment_metadata_version: str = "v2",
         items: list[dict] | None = None,
     ) -> OrderModel:
         order = OrderModel(
@@ -44,6 +45,7 @@ class OrderRepository(BaseRepository):
             customer_email=customer_email,
             payment_id=payment_id,
             idempotency_key=idempotency_key,
+            payment_metadata_version=payment_metadata_version,
             checkout_key=checkout_key,
         )
         self.session.add(order)
@@ -86,6 +88,7 @@ class OrderRepository(BaseRepository):
         if order:
             order.payment_id = payment_id
             order.payment_url = payment_url
+            order.payment_metadata_version = "v2"
             await self.session.commit()
 
     async def get_order_items(self, order_id: int) -> list[OrderItemModel]:

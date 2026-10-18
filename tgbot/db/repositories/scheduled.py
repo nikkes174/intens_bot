@@ -64,7 +64,7 @@ class ScheduledMessageRepository(BaseRepository):
         result = await self.session.execute(
             update(ScheduledMessageModel)
             .where(ScheduledMessageModel.id == job_id, ScheduledMessageModel.status == "pending")
-            .values(status="processing")
+            .values(status="processing", claimed_at=datetime.utcnow())
         )
         await self.session.commit()
         return bool(result.rowcount)
@@ -75,6 +75,7 @@ class ScheduledMessageRepository(BaseRepository):
             job.status = "sent"
             job.sent_at = now or datetime.utcnow()
             job.last_error = None
+            job.claimed_at = None
             await self.session.commit()
 
     async def mark_skipped(self, job_id: int, reason: str) -> None:
@@ -82,6 +83,7 @@ class ScheduledMessageRepository(BaseRepository):
         if job:
             job.status = "skipped"
             job.last_error = reason
+            job.claimed_at = None
             await self.session.commit()
 
     async def mark_failed(
@@ -96,6 +98,7 @@ class ScheduledMessageRepository(BaseRepository):
         if job:
             job.attempts += 1
             job.last_error = error[:4000]
+            job.claimed_at = None
             if retry and job.attempts < 5:
                 job.status = "pending"
                 job.scheduled_at = datetime.utcnow() + delay
@@ -133,11 +136,24 @@ class ScheduledMessageRepository(BaseRepository):
         )
         return result.scalar_one_or_none() is not None
 
-    async def recover_processing(self) -> int:
+    async def recover_processing(self, stale_before: datetime | None = None) -> int:
+        cutoff = stale_before or (datetime.utcnow() - timedelta(minutes=5))
         result = await self.session.execute(
             update(ScheduledMessageModel)
-            .where(ScheduledMessageModel.status == "processing")
-            .values(status="pending")
+            .where(
+                ScheduledMessageModel.status == "processing",
+                (ScheduledMessageModel.claimed_at.is_(None))
+                | (ScheduledMessageModel.claimed_at <= cutoff),
+            )
+            .values(
+                status="failed",
+                attempts=ScheduledMessageModel.attempts + 1,
+                last_error=(
+                    "Delivery outcome is uncertain after worker restart; "
+                    "not retried automatically to avoid a duplicate message."
+                ),
+                claimed_at=None,
+            )
         )
         await self.session.commit()
         return result.rowcount or 0
