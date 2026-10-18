@@ -59,6 +59,10 @@ ignore = [
 ]
 "tgbot/services/outbox.py" = [
     "PLR0917",  # too many positional arguments
+    "PLR0915",  # payment fulfilment coordinates message, files, and channel invites
+]
+"tgbot/services/scheduled.py" = [
+    "PLR0917",  # scheduled-message preparation receives its repositories explicitly
 ]
 "tgbot/handlers/user.py" = [
     "PLR0917",  # too many positional arguments

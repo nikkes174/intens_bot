@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from tgbot.db.models import UserTrainingAccessModel
 from tgbot.db.repositories.base import BaseRepository
@@ -28,6 +29,8 @@ class AccessRepository(BaseRepository):
     ) -> UserTrainingAccessModel:
         access = await self.get_access(user_id, training_id)
         if access:
+            if access.is_active:
+                return access
             access.is_active = True
             access.order_id = order_id
             access.granted_at = datetime.utcnow()
@@ -40,7 +43,14 @@ class AccessRepository(BaseRepository):
                 is_active=True,
             )
             self.session.add(access)
-        await self.session.commit()
+        try:
+            await self.session.commit()
+        except IntegrityError:
+            await self.session.rollback()
+            access = await self.get_access(user_id, training_id)
+            if access:
+                return access
+            raise
         await self.session.refresh(access)
         return access
 

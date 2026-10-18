@@ -1,57 +1,50 @@
-"""Seed data for initial trainings."""
+"""Idempotently seed the four current products without deleting legacy records."""
 
 import logging
+from decimal import Decimal
 
 from tgbot.db.db import get_session_factory
 from tgbot.db.repositories.training import TrainingRepository
+from tgbot.handlers.handlers_texts import PRODUCTS
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TRAININGS = [
-    {
-        "title": "Тренировка №1",
-        "description": "Программа тренировок для начинающих. Базовые упражнения для всего тела.",
-        "price": 990,
-        "sort_order": 1,
-    },
-    {
-        "title": "Тренировка №2",
-        "description": "Программа тренировок для среднего уровня. Развитие силы и выносливости.",
-        "price": 990,
-        "sort_order": 2,
-    },
-    {
-        "title": "Тренировка №3",
-        "description": "Интенсивная программа для продвинутых. Высокие нагрузки.",
-        "price": 990,
-        "sort_order": 3,
-    },
-    {
-        "title": "Тренировка №4",
-        "description": "Кардио-программа для похудения и тонуса.",
-        "price": 990,
-        "sort_order": 4,
-    },
-    {
-        "title": "Тренировка №5",
-        "description": "Комплексная программа: сила + кардио + гибкость.",
-        "price": 990,
-        "sort_order": 5,
-    },
-]
 
-
-async def seed_trainings():
-    """Create default trainings if none exist."""
+async def seed_products() -> None:
     session_factory = get_session_factory()
     async with session_factory() as session:
         training_repo = TrainingRepository(session)
-        existing = await training_repo.get_all()
-        if existing:
-            logger.info("Trainings already exist, skipping seed.")
-            return
+        existing_products = await training_repo.get_products(active_only=False)
+        existing_codes = {product.product_code for product in existing_products}
 
-        for training_data in DEFAULT_TRAININGS:
-            await training_repo.create(**training_data)
+        # Keep old rows and their purchases, but retire their old catalog cards.
+        all_trainings = await training_repo.get_all()
+        for training in all_trainings:
+            if training.product_code is None and training.is_active:
+                await training_repo.set_active(training.id, False)
 
-        logger.info("Seeded %d trainings.", len(DEFAULT_TRAININGS))
+        products_by_code = {product.product_code: product for product in existing_products}
+        for code, product_data in PRODUCTS.items():
+            if code not in existing_codes:
+                products_by_code[code] = await training_repo.create(
+                    product_code=code,
+                    title=product_data["title"],
+                    description=product_data["description"],
+                    price=Decimal(product_data["price"]),
+                    sort_order=product_data["sort_order"],
+                    is_bundle=product_data.get("is_bundle", False),
+                )
+
+        for bundle_code, product_data in PRODUCTS.items():
+            if not product_data.get("is_bundle"):
+                continue
+            bundle = products_by_code[bundle_code]
+            for component_code in product_data["components"]:
+                component = products_by_code[component_code]
+                await training_repo.add_bundle_component(bundle.id, component.id)
+
+    logger.info("Product catalog initialized with %d products.", len(PRODUCTS))
+
+
+# Kept as a compatibility alias for existing deployment scripts.
+seed_trainings = seed_products

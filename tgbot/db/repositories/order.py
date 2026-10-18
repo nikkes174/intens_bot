@@ -1,8 +1,10 @@
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
-from tgbot.db.models import OrderModel
+from tgbot.db.models import OrderItemModel, OrderModel
 from tgbot.db.repositories.base import BaseRepository
 
 
@@ -21,26 +23,78 @@ class OrderRepository(BaseRepository):
         self,
         user_id: int,
         training_id: int,
-        amount: float,
+        amount: Decimal | float,
         currency: str = "RUB",
         customer_email: str | None = None,
         payment_id: str | None = None,
         idempotency_key: str | None = None,
+        checkout_key: str | None = None,
+        discount_percent: Decimal | float = Decimal("0.00"),
+        discount_amount: Decimal | float = Decimal("0.00"),
+        items: list[dict] | None = None,
     ) -> OrderModel:
         order = OrderModel(
             user_id=user_id,
             training_id=training_id,
-            amount=amount,
+            amount=Decimal(str(amount)),
+            discount_percent=Decimal(str(discount_percent)),
+            discount_amount=Decimal(str(discount_amount)),
             currency=currency,
             status="pending",
             customer_email=customer_email,
             payment_id=payment_id,
             idempotency_key=idempotency_key,
+            checkout_key=checkout_key,
         )
         self.session.add(order)
-        await self.session.commit()
+        try:
+            await self.session.flush()
+            for item in items or []:
+                self.session.add(
+                    OrderItemModel(
+                        order_id=order.id,
+                        training_id=item["training_id"],
+                        item_price=Decimal(str(item["item_price"])),
+                        is_discounted=item.get("is_discounted", False),
+                    )
+                )
+            await self.session.commit()
+        except IntegrityError:
+            await self.session.rollback()
+            if checkout_key:
+                existing = await self.get_pending_checkout(checkout_key)
+                if existing:
+                    return existing
+            raise
         await self.session.refresh(order)
         return order
+
+    async def get_pending_checkout(self, checkout_key: str) -> OrderModel | None:
+        result = await self.session.execute(
+            select(OrderModel)
+            .where(
+                OrderModel.checkout_key == checkout_key,
+                OrderModel.status == "pending",
+            )
+            .order_by(OrderModel.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def set_payment_details(self, order_id: int, payment_id: str, payment_url: str) -> None:
+        order = await self.get_by_id(order_id)
+        if order:
+            order.payment_id = payment_id
+            order.payment_url = payment_url
+            await self.session.commit()
+
+    async def get_order_items(self, order_id: int) -> list[OrderItemModel]:
+        result = await self.session.execute(
+            select(OrderItemModel)
+            .where(OrderItemModel.order_id == order_id)
+            .order_by(OrderItemModel.id)
+        )
+        return list(result.scalars().all())
 
     async def update_status(
         self,

@@ -15,6 +15,7 @@ from tgbot.db.repositories.invite import InviteRepository
 from tgbot.db.repositories.material import MaterialRepository
 from tgbot.db.repositories.order import OrderRepository
 from tgbot.db.repositories.outbox import OutboxRepository
+from tgbot.db.repositories.scheduled import ScheduledMessageRepository
 from tgbot.db.repositories.training import TrainingRepository
 from tgbot.db.repositories.user import UserRepository
 
@@ -83,6 +84,11 @@ async def outbox_repo(db_session):
 @pytest_asyncio.fixture
 async def invite_repo(db_session):
     return InviteRepository(db_session)
+
+
+@pytest_asyncio.fixture
+async def scheduled_repo(db_session):
+    return ScheduledMessageRepository(db_session)
 
 
 @pytest_asyncio.fixture

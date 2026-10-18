@@ -1,4 +1,6 @@
+import html
 import logging
+from decimal import Decimal, InvalidOperation
 
 from aiogram import Bot, F, Router, types
 from aiogram.filters import Command
@@ -21,6 +23,7 @@ from tgbot.keyboards.inline import (
     admin_training_detail_keyboard,
     admin_trainings_keyboard,
 )
+from tgbot.services.pricing import format_money, quantize_money
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +84,7 @@ async def admin_trainings(callback_query: types.CallbackQuery, config: Config):
     session_factory = get_session_factory()
     async with session_factory() as session:
         training_repo = TrainingRepository(session)
-        trainings = await training_repo.get_all()
+        trainings = await training_repo.get_products(active_only=False)
 
     await callback_query.message.edit_text(
         "🏋️ Управление тренировками",
@@ -106,6 +109,9 @@ async def admin_training_detail(callback_query: types.CallbackQuery, config: Con
             return
 
         materials_count = await training_repo.count_materials(training_id)
+        components = (
+            await training_repo.get_bundle_components(training_id) if training.is_bundle else []
+        )
 
     group_status = "подключена" if training.telegram_chat_id else "не подключена"
     status = "активна" if training.is_active else "скрыта"
@@ -117,10 +123,15 @@ async def admin_training_detail(callback_query: types.CallbackQuery, config: Con
         f"Группа: {group_status}\n"
         f"Статус: {status}"
     )
+    if training.is_bundle:
+        component_names = ", ".join(item.title for item in components) or "не настроен"
+        text += f"\nСостав комплекта: {component_names}"
 
     await callback_query.message.edit_text(
         text,
-        reply_markup=admin_training_detail_keyboard(training_id, training.is_active),
+        reply_markup=admin_training_detail_keyboard(
+            training_id, training.is_active, is_bundle=training.is_bundle
+        ),
     )
 
 
@@ -137,7 +148,10 @@ async def admin_edit_title(callback_query: types.CallbackQuery, state: FSMContex
 
 
 @admin_router.message(AdminStates.waiting_for_title)
-async def process_new_title(message: Message, state: FSMContext):
+async def process_new_title(message: Message, state: FSMContext, config: Config):
+    if not is_admin(message.from_user.id, config):
+        await state.clear()
+        return
     title = message.text.strip()
     if not title:
         await message.answer("Название не может быть пустым.")
@@ -168,7 +182,10 @@ async def admin_edit_desc(callback_query: types.CallbackQuery, state: FSMContext
 
 
 @admin_router.message(AdminStates.waiting_for_description)
-async def process_new_description(message: Message, state: FSMContext):
+async def process_new_description(message: Message, state: FSMContext, config: Config):
+    if not is_admin(message.from_user.id, config):
+        await state.clear()
+        return
     description = message.text.strip()
     data = await state.get_data()
     training_id = data.get("training_id")
@@ -195,12 +212,15 @@ async def admin_edit_price(callback_query: types.CallbackQuery, state: FSMContex
 
 
 @admin_router.message(AdminStates.waiting_for_price)
-async def process_new_price(message: Message, state: FSMContext):
+async def process_new_price(message: Message, state: FSMContext, config: Config):
+    if not is_admin(message.from_user.id, config):
+        await state.clear()
+        return
     try:
-        price = float(message.text.strip())
+        price = quantize_money(Decimal(message.text.strip().replace(",", ".")))
         if price < 0:
             raise ValueError
-    except ValueError:
+    except (InvalidOperation, ValueError):
         await message.answer("Некорректная цена. Введите число:")
         return
 
@@ -213,7 +233,7 @@ async def process_new_price(message: Message, state: FSMContext):
         training_repo = TrainingRepository(session)
         await training_repo.update_price(training_id, price)
 
-    await message.answer(f"✅ Стоимость изменена на: {price} ₽")
+    await message.answer(f"✅ Стоимость изменена на: {format_money(price)} ₽")
 
 
 @admin_router.callback_query(F.data.startswith("admin_materials_"))
@@ -226,6 +246,12 @@ async def admin_materials(callback_query: types.CallbackQuery, config: Config):
 
     session_factory = get_session_factory()
     async with session_factory() as session:
+        training = await TrainingRepository(session).get_by_id(training_id)
+        if training and training.is_bundle:
+            await callback_query.message.answer(
+                "Материалы комплекта хранятся в карточках входящих программ."
+            )
+            return
         material_repo = MaterialRepository(session)
         materials = await material_repo.get_by_training(training_id)
 
@@ -244,6 +270,14 @@ async def admin_add_material(
         return
 
     training_id = int(callback_query.data.split("_")[3])
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        training = await TrainingRepository(session).get_by_id(training_id)
+        if not training or training.is_bundle:
+            await callback_query.message.answer(
+                "Добавляй материалы в карточки отдельных программ, входящих в комплект."
+            )
+            return
     await state.set_state(AdminStates.waiting_for_material)
     await state.update_data(training_id=training_id)
     await callback_query.message.answer(
@@ -253,7 +287,10 @@ async def admin_add_material(
 
 
 @admin_router.message(AdminStates.waiting_for_material)
-async def process_new_material(message: Message, state: FSMContext, bot: Bot):
+async def process_new_material(message: Message, state: FSMContext, bot: Bot, config: Config):
+    if not is_admin(message.from_user.id, config):
+        await state.clear()
+        return
     data = await state.get_data()
     training_id = data.get("training_id")
 
@@ -300,6 +337,7 @@ async def process_new_material(message: Message, state: FSMContext, bot: Bot):
             telegram_file_id=telegram_file_id,
             telegram_file_unique_id=telegram_file_unique_id,
             file_name=file_name,
+            caption=message.caption,
             text_content=text_content,
             sort_order=max_order + 1,
         )
@@ -374,6 +412,14 @@ async def admin_link_group(callback_query: types.CallbackQuery, state: FSMContex
         return
 
     training_id = int(callback_query.data.split("_")[3])
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        training = await TrainingRepository(session).get_by_id(training_id)
+        if not training or training.is_bundle:
+            await callback_query.message.answer(
+                "Подключи отдельный канал к каждой программе комплекта."
+            )
+            return
     await state.set_state(AdminStates.waiting_for_chat_id)
     await state.update_data(training_id=training_id)
 
@@ -386,7 +432,10 @@ async def admin_link_group(callback_query: types.CallbackQuery, state: FSMContex
 
 
 @admin_router.message(AdminStates.waiting_for_chat_id)
-async def process_chat_id(message: Message, state: FSMContext, bot: Bot):
+async def process_chat_id(message: Message, state: FSMContext, bot: Bot, config: Config):
+    if not is_admin(message.from_user.id, config):
+        await state.clear()
+        return
     try:
         chat_id = int(message.text.strip())
     except ValueError:
@@ -468,7 +517,10 @@ async def admin_users(callback_query: types.CallbackQuery, state: FSMContext, co
 
 
 @admin_router.message(AdminStates.waiting_for_user_search)
-async def search_user(message: Message, state: FSMContext):
+async def search_user(message: Message, state: FSMContext, config: Config):
+    if not is_admin(message.from_user.id, config):
+        await state.clear()
+        return
     try:
         telegram_user_id = int(message.text.strip())
     except ValueError:
@@ -482,6 +534,7 @@ async def search_user(message: Message, state: FSMContext):
         user_repo = UserRepository(session)
         order_repo = OrderRepository(session)
         access_repo = AccessRepository(session)
+        training_repo = TrainingRepository(session)
 
         user = await user_repo.get_by_telegram_id(telegram_user_id)
         if not user:
@@ -494,9 +547,9 @@ async def search_user(message: Message, state: FSMContext):
         total_spent = sum(o.amount for o in orders if o.status == "succeeded")
 
         text = (
-            f"👤 Пользователь: {user.username or 'без username'}\n"
+            f"👤 Пользователь: {html.escape(user.username or 'без username')}\n"
             f"🆔 Telegram ID: {user.telegram_user_id}\n"
-            f"📧 Email: {user.email or 'не указан'}\n"
+            f"📧 Email: {html.escape(user.email or 'не указан')}\n"
             f"💰 Потрачено: {total_spent} ₽\n"
             f"📚 Приобретено тренировок: {len(accesses)}\n"
         )
@@ -504,7 +557,22 @@ async def search_user(message: Message, state: FSMContext):
         if orders:
             text += "\n📋 История заказов:\n"
             for order in orders[:10]:
-                text += f"  - Заказ #{order.id}: {order.amount} ₽ ({order.status})\n"
+                line_items = await order_repo.get_order_items(order.id)
+                products = []
+                for item in line_items:
+                    product = await training_repo.get_by_id(item.training_id)
+                    if product:
+                        products.append(html.escape(product.title))
+                if not products:
+                    product = await training_repo.get_by_id(order.training_id)
+                    products.append(html.escape(product.title if product else "программа"))
+                discount = (
+                    f", скидка {order.discount_percent}%" if order.discount_percent > 0 else ""
+                )
+                text += (
+                    f"  - Заказ #{order.id} ({' + '.join(products)}): {order.amount} ₽ "
+                    f"({order.status}{discount})\n"
+                )
 
         await message.answer(text)
 

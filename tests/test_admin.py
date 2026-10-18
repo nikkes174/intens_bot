@@ -1,6 +1,8 @@
 """Tests for admin panel."""
 
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -162,3 +164,20 @@ async def test_same_group_cannot_link_to_two_trainings(training_repo):
     existing = await training_repo.get_by_chat_id(-1001234567890)
     assert existing is not None
     assert existing.id == training1.id
+
+
+@pytest.mark.asyncio
+async def test_regular_user_cannot_use_admin_price_state(admin_config):
+    from tgbot.handlers.admin import process_new_price
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=987654321),
+        text="1",
+        answer=AsyncMock(),
+    )
+    state = SimpleNamespace(clear=AsyncMock(), get_data=AsyncMock())
+
+    await process_new_price(message, state, admin_config)
+
+    state.clear.assert_awaited_once()
+    message.answer.assert_not_called()

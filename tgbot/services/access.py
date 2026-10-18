@@ -32,12 +32,18 @@ class AccessService:
         training_id: int,
         training_repo: TrainingRepository,
         invite_repo: InviteRepository,
+        force_new: bool = False,
     ) -> str | None:
         """Create an invite link for a user to join the training group."""
         training = await training_repo.get_by_id(training_id)
         if not training or not training.telegram_chat_id:
             logger.warning("Training %s has no group configured", training_id)
             return None
+
+        if not force_new:
+            active_invite = await invite_repo.get_active_for_user(user_id, training_id)
+            if active_invite and isinstance(active_invite.invite_link, str):
+                return active_invite.invite_link
 
         try:
             expire_date = datetime.utcnow() + timedelta(hours=self.INVITE_LINK_EXPIRE_HOURS)

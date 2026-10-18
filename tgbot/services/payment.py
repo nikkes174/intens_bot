@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from aiogram import Bot
@@ -13,6 +13,7 @@ from tgbot.config import YooKassaConfig
 from tgbot.db.repositories.access import AccessRepository
 from tgbot.db.repositories.order import OrderRepository
 from tgbot.db.repositories.outbox import OutboxRepository
+from tgbot.db.repositories.scheduled import ScheduledMessageRepository
 from tgbot.db.repositories.training import TrainingRepository
 from tgbot.db.repositories.user import UserRepository
 
@@ -41,11 +42,20 @@ class PaymentService:
         amount: Decimal,
         currency: str = "RUB",
         description: str = "",
+        idempotency_key: str | None = None,
+        receipt_items: list[dict] | None = None,
     ) -> tuple[str, str]:
         """Create a YooKassa payment and return (payment_id, confirmation_url)."""
         self._configure()
 
-        idempotency_key = str(uuid.uuid4())
+        idempotency_key = idempotency_key or str(uuid.uuid4())
+
+        line_items = receipt_items or [
+            {
+                "description": description or f"Тренировка #{training_id}",
+                "amount": Decimal(amount),
+            }
+        ]
 
         payload = {
             "amount": {"value": str(amount), "currency": currency},
@@ -64,13 +74,17 @@ class PaymentService:
                 "customer": {"email": email},
                 "items": [
                     {
-                        "description": description or f"Тренировка #{training_id}",
+                        "description": item["description"][:128],
                         "quantity": "1.00",
-                        "amount": {"value": str(amount), "currency": currency},
+                        "amount": {
+                            "value": str(Decimal(item["amount"]).quantize(Decimal("0.01"))),
+                            "currency": currency,
+                        },
                         "payment_mode": "full_payment",
                         "payment_subject": "service",
                         "vat_code": self.config.vat_code,
                     }
+                    for item in line_items
                 ],
             },
         }
@@ -107,6 +121,7 @@ class PaymentService:
         outbox_repo: OutboxRepository,
         user_repo: UserRepository,
         training_repo: TrainingRepository,
+        scheduled_repo: ScheduledMessageRepository | None = None,
     ) -> bool:
         """Process a successful payment webhook. Returns True if processed."""
         order = await order_repo.get_by_payment_id(payment_id)
@@ -114,61 +129,81 @@ class PaymentService:
             logger.warning("Order for payment %s not found", payment_id)
             return False
 
-        if order.status == "succeeded":
-            logger.info("Order %s already succeeded, skipping", order.id)
-            return True
+        already_succeeded = order.status == "succeeded"
+        if not already_succeeded:
+            # A webhook is only a notification; ask YooKassa for the authoritative state.
+            payment_info = await self.get_payment_status(payment_id)
+            if not payment_info or payment_info["status"] != "succeeded":
+                logger.warning("Payment %s is not confirmed as succeeded", payment_id)
+                return False
 
-        # Verify with YooKassa API
-        payment_info = await self.get_payment_status(payment_id)
-        if not payment_info:
-            logger.error("Could not verify payment %s with YooKassa", payment_id)
-            return False
+            if Decimal(str(payment_info["amount"])).quantize(Decimal("0.01")) != order.amount:
+                logger.error(
+                    "Amount mismatch for payment %s: expected %s, got %s",
+                    payment_id,
+                    order.amount,
+                    payment_info["amount"],
+                )
+                return False
 
-        if payment_info["status"] != "succeeded":
-            logger.warning(
-                "Payment %s status is %s, not succeeded",
-                payment_id,
-                payment_info["status"],
-            )
-            return False
+            if payment_info["currency"] != order.currency:
+                logger.error("Currency mismatch for payment %s", payment_id)
+                return False
 
-        # Verify amount and currency
-        if Decimal(payment_info["amount"]) != order.amount:
-            logger.error(
-                "Amount mismatch for payment %s: expected %s, got %s",
-                payment_id,
-                order.amount,
-                payment_info["amount"],
-            )
-            return False
+        order_items = await order_repo.get_order_items(order.id)
+        purchased_ids = [item.training_id for item in order_items] or [order.training_id]
+        grant_ids: set[int] = set()
+        for purchased_id in purchased_ids:
+            grant_ids.update(await training_repo.get_component_ids(purchased_id))
+            # Record the bundle itself as owned too; its component rights remain separate.
+            product = await training_repo.get_by_id(purchased_id)
+            if product and product.is_bundle:
+                await access_repo.grant_access(order.user_id, purchased_id, order.id)
+        for training_id in sorted(grant_ids):
+            await access_repo.grant_access(order.user_id, training_id, order.id)
 
-        if payment_info["currency"] != order.currency:
-            logger.error(
-                "Currency mismatch for payment %s: expected %s, got %s",
-                payment_id,
-                order.currency,
-                payment_info["currency"],
-            )
-            return False
+        paid_at = order.paid_at or datetime.utcnow()
+        if not already_succeeded:
+            await order_repo.update_status(order.id, "succeeded", paid_at=paid_at)
 
-        # Update order status
-        await order_repo.update_status(order.id, "succeeded", paid_at=datetime.utcnow())
-
-        # Grant access
-        await access_repo.grant_access(order.user_id, order.training_id, order.id)
-
-        # Create outbox events for delivery and invite
-        await outbox_repo.create_event(
-            "payment_succeeded",
-            json.dumps(
-                {
-                    "order_id": order.id,
-                    "user_id": order.user_id,
-                    "training_id": order.training_id,
-                    "payment_id": payment_id,
-                }
-            ),
+        payload = json.dumps(
+            {
+                "order_id": order.id,
+                "user_id": order.user_id,
+                "training_id": order.training_id,
+                "training_ids": sorted(grant_ids),
+                "product_ids": purchased_ids,
+                "payment_id": payment_id,
+            }
         )
+        await outbox_repo.create_event(
+            "payment_succeeded", payload, dedupe_key=f"payment:{order.id}:succeeded"
+        )
+
+        if scheduled_repo:
+            for training_id in sorted(grant_ids):
+                await scheduled_repo.cancel_product_reminders(order.user_id, [training_id])
+            await scheduled_repo.cancel_product_reminders(order.user_id, purchased_ids)
+
+            if not await scheduled_repo.get_by_dedupe_key(f"order:{order.id}:followup-72h"):
+                await scheduled_repo.schedule(
+                    dedupe_key=f"order:{order.id}:followup-72h",
+                    user_id=order.user_id,
+                    order_id=order.id,
+                    message_type="followup_72h",
+                    scheduled_at=paid_at + timedelta(hours=72),
+                )
+
+            if order.discount_percent == Decimal("0.00") and len(purchased_ids) == 1:
+                product = await training_repo.get_by_id(purchased_ids[0])
+                if product and not product.is_bundle:
+                    await scheduled_repo.schedule(
+                        dedupe_key=f"order:{order.id}:followup-7d",
+                        user_id=order.user_id,
+                        order_id=order.id,
+                        message_type="followup_7d",
+                        scheduled_at=paid_at + timedelta(days=7),
+                    )
 
         logger.info("Payment %s processed successfully for order %s", payment_id, order.id)
         return True
@@ -177,6 +212,8 @@ class PaymentService:
         self,
         payment_id: str,
         order_repo: OrderRepository,
+        outbox_repo: OutboxRepository | None = None,
+        training_repo: TrainingRepository | None = None,
     ) -> bool:
         """Process a canceled payment webhook."""
         order = await order_repo.get_by_payment_id(payment_id)
@@ -188,6 +225,30 @@ class PaymentService:
             logger.info("Order %s already succeeded, ignoring cancel", order.id)
             return True
 
-        await order_repo.update_status(order.id, "canceled")
+        if order.status != "canceled":
+            payment_info = await self.get_payment_status(payment_id)
+            if not payment_info or payment_info["status"] != "canceled":
+                logger.info("Payment %s is not confirmed as canceled", payment_id)
+                return False
+            await order_repo.update_status(order.id, "canceled")
+
+        if outbox_repo:
+            product_code = None
+            if order.discount_percent > Decimal("0"):
+                product_code = "discount_offer"
+            elif training_repo:
+                product = await training_repo.get_by_id(order.training_id)
+                product_code = product.product_code if product else None
+            await outbox_repo.create_event(
+                "payment_canceled",
+                json.dumps(
+                    {
+                        "order_id": order.id,
+                        "user_id": order.user_id,
+                        "product_code": product_code,
+                    }
+                ),
+                dedupe_key=f"payment:{order.id}:canceled",
+            )
         logger.info("Payment %s canceled for order %s", payment_id, order.id)
         return True

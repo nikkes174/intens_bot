@@ -126,8 +126,6 @@ class DeliveryService:
                 caption=material.caption,
             )
         else:
-            logger.warning(
-                "Material %s has no content to send (type: %s)",
-                material.id,
-                material.material_type,
+            raise ValueError(
+                f"Material {material.id} has no content to send (type: {material.material_type})"
             )

@@ -30,11 +30,16 @@ class InviteRepository(BaseRepository):
         return invite
 
     async def get_active_for_user(self, user_id: int, training_id: int) -> InviteLinkModel | None:
+        now = datetime.utcnow()
         result = await self.session.execute(
-            select(InviteLinkModel).where(
+            select(InviteLinkModel)
+            .where(
                 InviteLinkModel.user_id == user_id,
                 InviteLinkModel.training_id == training_id,
                 InviteLinkModel.is_active,
+                (InviteLinkModel.expire_date.is_(None)) | (InviteLinkModel.expire_date > now),
             )
+            .order_by(InviteLinkModel.created_at.desc())
+            .limit(1)
         )
         return result.scalar_one_or_none()

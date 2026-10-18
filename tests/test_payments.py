@@ -91,15 +91,35 @@ async def test_canceled_payment(payment_service, order_repo, sample_user, sample
         payment_id="payment_canceled",
     )
 
-    result = await payment_service.process_payment_canceled(
-        "payment_canceled",
-        order_repo,
-    )
+    with patch.object(payment_service, "get_payment_status") as mock_status:
+        mock_status.return_value = {"id": "payment_canceled", "status": "canceled"}
+        result = await payment_service.process_payment_canceled("payment_canceled", order_repo)
 
     assert result is True
 
     updated_order = await order_repo.get_by_id(order.id)
     assert updated_order.status == "canceled"
+
+
+@pytest.mark.asyncio
+async def test_temporary_status_does_not_mark_payment_canceled(
+    payment_service, order_repo, sample_user, sample_training
+):
+    order = await order_repo.create(
+        user_id=sample_user.id,
+        training_id=sample_training.id,
+        amount=Decimal("990.00"),
+        payment_id="payment_pending",
+    )
+    with patch.object(
+        payment_service,
+        "get_payment_status",
+        return_value={"id": "payment_pending", "status": "pending"},
+    ):
+        result = await payment_service.process_payment_canceled("payment_pending", order_repo)
+
+    assert result is False
+    assert (await order_repo.get_by_id(order.id)).status == "pending"
 
 
 @pytest.mark.asyncio

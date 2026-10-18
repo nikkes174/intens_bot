@@ -11,8 +11,12 @@ from fastapi import FastAPI
 
 from tgbot.config import load_config
 from tgbot.db.db import close_db, get_engine, init_db
+from tgbot.db.migrate import run_migrations
+from tgbot.db.seed import seed_products
 from tgbot.handlers import admin_router, user_router
 from tgbot.middlewares.config import ConfigMiddleware
+from tgbot.services.outbox import OutboxProcessor
+from tgbot.services.scheduled import ScheduledMessageProcessor
 from tgbot.webhooks import yookassa_router
 
 logger = logging.getLogger(__name__)
@@ -28,6 +32,7 @@ def setup_logging(log_level: str = "INFO"):
 
 def create_app(config) -> FastAPI:
     app = FastAPI(title="YooKassa Webhook")
+    app.state.config = config
     app.include_router(yookassa_router)
 
     @app.get("/health")
@@ -59,9 +64,11 @@ async def main():
     config = load_config(".env")
     setup_logging(config.misc.log_level)
 
-    # Initialize database
+    # Apply versioned schema changes before ORM initialization and seed the catalog.
+    await asyncio.to_thread(run_migrations, config.db.url)
     get_engine(config.db)
     await init_db(config.db)
+    await seed_products()
 
     # Bot setup
     storage = MemoryStorage()
@@ -92,14 +99,22 @@ async def main():
 
     bot_task = asyncio.create_task(dp.start_polling(bot))
     server_task = asyncio.create_task(server.serve())
+    outbox_task = asyncio.create_task(OutboxProcessor(bot, config.tg_bot.admin_ids).start())
+    scheduled_task = asyncio.create_task(ScheduledMessageProcessor(bot).start())
 
     logger.info("Bot started. Webhook server on port %d", config.webhook.port)
 
     try:
-        await asyncio.gather(bot_task, server_task)
+        await asyncio.gather(bot_task, server_task, outbox_task, scheduled_task)
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down...")
     finally:
+        for task in (bot_task, server_task, outbox_task, scheduled_task):
+            task.cancel()
+        await asyncio.gather(
+            bot_task, server_task, outbox_task, scheduled_task, return_exceptions=True
+        )
+        await bot.session.close()
         await close_db()
 
 
