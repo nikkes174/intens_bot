@@ -57,7 +57,6 @@ DB=sqlite+aiosqlite:///bot.db
 YOOKASSA_SHOP_ID=ваш_shop_id
 YOOKASSA_SECRET_KEY=ваш_secret_key
 YOOKASSA_RETURN_URL=https://t.me/your_bot_username
-YOOKASSA_VAT_CODE=1
 WEBHOOK_HOST=0.0.0.0
 WEBHOOK_PORT=8000
 LOG_LEVEL=INFO
@@ -213,13 +212,15 @@ alembic downgrade -1
 | YOOKASSA_SHOP_ID | ID магазина YooKassa |
 | YOOKASSA_SECRET_KEY | Секретный ключ YooKassa |
 | YOOKASSA_RETURN_URL | URL возврата после оплаты |
-| YOOKASSA_VAT_CODE | Код НДС |
 | WEBHOOK_HOST | Хост webhook-сервера |
 | WEBHOOK_PORT | Порт webhook-сервера |
 | LOG_LEVEL | Уровень логирования |
 | GLUTE_ID | Chat ID группы Glute Protocol |
 | V_SHARE_ID | Chat ID группы V-Shape |
 | CORE_PROTOCOL_ID | Chat ID группы Core Protocol |
+
+Для чеков самозанятого сервис передаёт YooKassa код НДС `1` («без НДС»); отдельная
+переменная `YOOKASSA_VAT_CODE` не нужна.
 
 ## Лицензия
 

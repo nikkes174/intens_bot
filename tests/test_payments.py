@@ -4,6 +4,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from environs import Env
 
 from tgbot.config import YooKassaConfig
 from tgbot.services.payment import PaymentService
@@ -31,7 +32,6 @@ def yookassa_config():
         shop_id="test_shop",
         secret_key="test_secret",
         return_url="https://t.me/test_bot",
-        vat_code=1,
     )
 
 
@@ -61,6 +61,15 @@ async def test_create_payment(payment_service):
         assert "yoomoney" in url
         assert mock_create.call_args.args[0]["metadata"]["order_id"] == "42"
         assert mock_create.call_args.args[0]["metadata"]["metadata_version"] == "2"
+        assert mock_create.call_args.args[0]["receipt"]["items"][0]["vat_code"] == 1
+
+
+def test_yookassa_config_does_not_require_vat_env(monkeypatch):
+    monkeypatch.delenv("YOOKASSA_VAT_CODE", raising=False)
+
+    config = YooKassaConfig.from_env(Env())
+
+    assert not hasattr(config, "vat_code")
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,6 @@ def app():
                 "shop_id": "test",
                 "secret_key": "test",
                 "return_url": "https://t.me/",
-                "vat_code": 1,
             },
         )(),
         webhook=type("WebhookConfig", (), {"host": "0.0.0.0", "port": 8000})(),

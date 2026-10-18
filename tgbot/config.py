@@ -120,7 +120,6 @@ class YooKassaConfig:
     shop_id: str = ""
     secret_key: str = ""
     return_url: str = ""
-    vat_code: int = 1
     webhook_path: str = "/webhooks/yookassa"
 
     @staticmethod
@@ -129,7 +128,6 @@ class YooKassaConfig:
             shop_id=env.str("YOOKASSA_SHOP_ID", ""),
             secret_key=env.str("YOOKASSA_SECRET_KEY", ""),
             return_url=env.str("YOOKASSA_RETURN_URL", "https://t.me/"),
-            vat_code=env.int("YOOKASSA_VAT_CODE", 1),
             webhook_path=env.str("YOOKASSA_WEBHOOK_PATH", "/webhooks/yookassa"),
         )
 

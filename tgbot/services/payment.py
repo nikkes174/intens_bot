@@ -19,6 +19,10 @@ from tgbot.db.repositories.user import UserRepository
 
 logger = logging.getLogger(__name__)
 
+# YooKassa requires a VAT code on receipt items. Code 1 means "без НДС" and is
+# used for this self-employed merchant setup; it does not need an env setting.
+SELF_EMPLOYED_VAT_CODE = 1
+
 
 def _metadata_to_dict(metadata) -> dict:
     if metadata is None:
@@ -102,7 +106,7 @@ class PaymentService:
                         },
                         "payment_mode": "full_payment",
                         "payment_subject": "service",
-                        "vat_code": self.config.vat_code,
+                        "vat_code": SELF_EMPLOYED_VAT_CODE,
                     }
                     for item in line_items
                 ],
