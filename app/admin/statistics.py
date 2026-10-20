@@ -20,14 +20,10 @@ async def render_stats():
         since_7 = now - timedelta(days=7)
         since_30 = now - timedelta(days=30)
         last_7 = await db.scalar(
-            select(func.count())
-            .select_from(Detection)
-            .where(Detection.created_at >= since_7)
+            select(func.count()).select_from(Detection).where(Detection.created_at >= since_7)
         )
         last_30 = await db.scalar(
-            select(func.count())
-            .select_from(Detection)
-            .where(Detection.created_at >= since_30)
+            select(func.count()).select_from(Detection).where(Detection.created_at >= since_30)
         )
 
         top_result = await db.execute(

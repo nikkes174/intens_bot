@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Any
@@ -8,6 +9,12 @@ from sqlalchemy import select
 
 from app.database import session_scope
 from app.models import Exclusion, Source
+
+from telethon import errors as telethon_errors
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
+from telethon.tl.types import ChatInviteAlready
+from telethon.utils import get_peer_id
 
 
 AUDIENCE_TTL = timedelta(hours=6)
@@ -211,9 +218,7 @@ async def set_source_enabled(source_id: int, enabled: bool) -> None:
 async def set_source_excluded(source_id: int, excluded: bool) -> None:
     async with session_scope() as db:
         async with db.begin():
-            result = await db.execute(
-                select(Source).where(Source.telegram_id == source_id)
-            )
+            result = await db.execute(select(Source).where(Source.telegram_id == source_id))
             source = result.scalar_one_or_none()
             if source is not None:
                 source.excluded = excluded
@@ -235,3 +240,180 @@ async def is_excluded(source_id: int) -> bool:
             select(Exclusion).where(Exclusion.source_telegram_id == source_id)
         )
         return result.scalar_one_or_none() is not None
+
+
+_USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{3,31}$")
+_JOIN_LOCKS: dict[str, object] = {}
+
+
+def _join_lock(key: str):
+    import asyncio
+
+    lock = _JOIN_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _JOIN_LOCKS[key] = lock
+    return lock
+
+
+def parse_source_link(text: str):
+    value = (text or "").strip()
+    if not value:
+        return None
+    if value.startswith("@"):
+        username = value[1:]
+        if _USERNAME_RE.match(username):
+            return ("public", username)
+        return None
+
+    match = re.search(r"(?:https?://)?(?:t|telegram)\.me/([^\s?#]+)", value, re.IGNORECASE)
+    if not match:
+        return None
+    path = match.group(1).strip("/")
+    if not path:
+        return None
+    segments = [segment for segment in path.split("/") if segment]
+    if not segments:
+        return None
+    if segments[0].startswith("+"):
+        invite_hash = segments[0][1:]
+        if invite_hash:
+            return ("invite", invite_hash)
+        return None
+    if segments[0] == "joinchat":
+        if len(segments) < 2:
+            return None
+        invite_hash = segments[1]
+        if not invite_hash or "/" in invite_hash:
+            return None
+        return ("invite", invite_hash)
+    if len(segments) == 1:
+        username = segments[0]
+        if _USERNAME_RE.match(username):
+            return ("public", username)
+    return None
+
+
+def _entity_source_type(entity) -> str:
+    if getattr(entity, "broadcast", False):
+        return "channel"
+    if getattr(entity, "megagroup", False):
+        return "supergroup"
+    return "group"
+
+
+async def ensure_source_from_entity(client, entity) -> Source:
+    telegram_id = get_peer_id(entity)
+    title = getattr(entity, "title", None) or str(telegram_id)
+    username = getattr(entity, "username", None)
+    source_type = _entity_source_type(entity)
+
+    audience = getattr(entity, "participants_count", None)
+    if audience is None and client is not None:
+        try:
+            participants = await client.get_participants(entity, limit=0)
+            audience = getattr(participants, "total", None)
+        except Exception:
+            audience = None
+
+    async with session_scope() as db:
+        async with db.begin():
+            result = await db.execute(select(Source).where(Source.telegram_id == telegram_id))
+            source = result.scalar_one_or_none()
+            if source is None:
+                source = Source(
+                    telegram_id=telegram_id,
+                    title=title,
+                    username=username,
+                    source_type=source_type,
+                    enabled=True,
+                    excluded=False,
+                )
+                db.add(source)
+            else:
+                source.title = title or source.title
+                source.username = username if username is not None else source.username
+                source.source_type = source_type
+                source.enabled = True
+                source.excluded = False
+
+            from app.models import Exclusion
+
+            exclusion_result = await db.execute(
+                select(Exclusion).where(Exclusion.source_telegram_id == telegram_id)
+            )
+            exclusion = exclusion_result.scalar_one_or_none()
+            if exclusion is not None:
+                await db.delete(exclusion)
+
+            if audience is not None:
+                source.audience = audience
+                source.audience_updated_at = datetime.now(timezone.utc)
+            await db.flush()
+            db.expunge(source)
+    invalidate_source_cache(telegram_id)
+    return source
+
+
+async def join_source(client, link: str):
+    parsed = parse_source_link(link)
+    if parsed is None:
+        raise ValueError("invalid link")
+    kind, value = parsed
+    lock_key = f"{kind}:{value.lower()}"
+    async with _join_lock(lock_key):
+        if client is None:
+            raise RuntimeError("client unavailable")
+        already_member = False
+        if kind == "public":
+            entity = await client.get_entity(value)
+            if not (getattr(entity, "broadcast", False) or getattr(entity, "megagroup", False)):
+                raise ValueError("not a channel")
+            try:
+                await client(JoinChannelRequest(entity))
+            except telethon_errors.UserAlreadyParticipantError:
+                already_member = True
+            except telethon_errors.InviteRequestSentError:
+                raise
+        else:
+            invite = await client(CheckChatInviteRequest(value))
+            if isinstance(invite, ChatInviteAlready):
+                entity = invite.chat
+                already_member = True
+            else:
+                try:
+                    updates = await client(ImportChatInviteRequest(value))
+                    entity = updates.chats[0] if getattr(updates, "chats", None) else None
+                except telethon_errors.UserAlreadyParticipantError:
+                    already_member = True
+                    invite = await client(CheckChatInviteRequest(value))
+                    entity = getattr(invite, "chat", None)
+                except telethon_errors.InviteRequestSentError:
+                    raise
+            if entity is None:
+                raise ValueError("not found")
+            if not (
+                getattr(entity, "broadcast", False)
+                or getattr(entity, "megagroup", False)
+                or getattr(entity, "id", None)
+            ):
+                raise ValueError("not a channel")
+            if not already_member:
+                try:
+                    await client(JoinChannelRequest(entity))
+                except telethon_errors.UserAlreadyParticipantError:
+                    already_member = True
+                except telethon_errors.InviteRequestSentError:
+                    raise
+
+        source = await ensure_source_from_entity(client, entity)
+        source.already_member = already_member
+        return source
+
+
+# Compatibility aliases
+join_channel = join_source
+join_chat = join_source
+add_source_by_link = join_source
+add_channel = join_source
+subscribe_to_source = join_source

@@ -11,6 +11,7 @@ from app.admin.keyboards import (
     sources_keyboard,
     source_actions_keyboard,
     confirm_exclude_keyboard,
+    source_add_cancel_keyboard,
 )
 from app.config import is_admin
 from app.database import session_scope
@@ -30,8 +31,7 @@ def _strip_exclude_button(markup):
     rows = []
     for row in markup.inline_keyboard:
         if any(
-            getattr(button, "callback_data", "").startswith("notify:exclude:")
-            for button in row
+            getattr(button, "callback_data", "").startswith("notify:exclude:") for button in row
         ):
             continue
         rows.append(row)
@@ -40,6 +40,7 @@ def _strip_exclude_button(markup):
 
 class SourceStates(StatesGroup):
     waiting_for_search = State()
+    waiting_for_source_link = State()
 
 
 async def _show_sources(callback: CallbackQuery, page: int = 0, search: str = ""):
@@ -99,9 +100,7 @@ async def process_source_search(message: Message, state: FSMContext):
     # Reuse a fake callback-like edit by sending new message with keyboard.
     total = await source_service.count_sources(search or None)
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    items = await source_service.list_sources(
-        limit=PAGE_SIZE, offset=0, search=search or None
-    )
+    items = await source_service.list_sources(limit=PAGE_SIZE, offset=0, search=search or None)
     text = "📡 Каналы и группы"
     if search:
         text += f"\nПоиск: {search}"
@@ -109,9 +108,7 @@ async def process_source_search(message: Message, state: FSMContext):
         text = "Источники не найдены."
     from app.admin.keyboards import sources_keyboard
 
-    await message.answer(
-        text, reply_markup=sources_keyboard(items, 0, total_pages, search)
-    )
+    await message.answer(text, reply_markup=sources_keyboard(items, 0, total_pages, search))
 
 
 @router.callback_query(F.data.startswith("source:view:"))
@@ -127,9 +124,7 @@ async def source_view(callback: CallbackQuery):
             return
         db.expunge(source)
     audience = source.audience
-    audience_text = (
-        f"{audience:,}".replace(",", " ") if audience is not None else "неизвестна"
-    )
+    audience_text = f"{audience:,}".replace(",", " ") if audience is not None else "неизвестна"
     text = (
         f"📡 {source.title or source.telegram_id}\n\n"
         f"ID: {source.telegram_id}\n"
@@ -138,9 +133,7 @@ async def source_view(callback: CallbackQuery):
         f"Исключён: {'да' if source.excluded else 'нет'}\n"
         f"Аудитория: {audience_text}"
     )
-    await callback.message.edit_text(
-        text, reply_markup=source_actions_keyboard(source.id)
-    )
+    await callback.message.edit_text(text, reply_markup=source_actions_keyboard(source.id))
     await callback.answer()
 
 
@@ -196,10 +189,87 @@ async def source_refresh(callback: CallbackQuery):
     if monitor_module._client is not None:
         service.client = monitor_module._client
     audience = await service.refresh_audience(telegram_id)
-    await callback.answer(
-        f"Аудитория: {audience if audience is not None else 'неизвестна'}"
-    )
+    await callback.answer(f"Аудитория: {audience if audience is not None else 'неизвестна'}")
     await source_view(callback)
+
+
+@router.callback_query(F.data == "sources:add")
+async def sources_add(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    await state.set_state(SourceStates.waiting_for_source_link)
+    await callback.message.edit_text(
+        "Отправьте ссылку на Telegram-канал или группу",
+        reply_markup=source_add_cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sources:add_cancel")
+async def sources_add_cancel(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    await state.clear()
+    await _show_sources(callback, 0, "")
+    await callback.answer()
+
+
+@router.message(SourceStates.waiting_for_source_link)
+async def process_source_link(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    client = monitor_module._client
+    if client is None:
+        await message.answer("Пользовательский Telegram-аккаунт сейчас недоступен")
+        await state.clear()
+        return
+    link = (message.text or "").strip()
+    from app.userbot.sources import join_source, parse_source_link
+
+    if parse_source_link(link) is None:
+        await message.answer("Неверная ссылка на канал или группу")
+        return
+
+    try:
+        source = await join_source(client, link)
+    except Exception as exc:  # noqa: BLE001
+        error_name = type(exc).__name__
+        message_text = "Не удалось найти канал"
+        if "FloodWait" in error_name:
+            seconds = getattr(exc, "seconds", None) or getattr(exc, "retry_after", None) or 0
+            message_text = (
+                f"Telegram временно ограничил вступление в каналы. Подождите {seconds} сек."
+            )
+        elif "InviteRequestSent" in error_name:
+            message_text = "Заявка на вступление отправлена, ожидается одобрение"
+        elif "InviteHashExpired" in error_name or "InviteHashInvalid" in error_name:
+            message_text = "Пригласительная ссылка недействительна или устарела"
+        elif "UserAlreadyParticipant" in error_name:
+            message_text = "Вы уже подписаны на этот канал"
+        elif isinstance(exc, (ConnectionError, TimeoutError, OSError, RuntimeError)):
+            message_text = "Пользовательский Telegram-аккаунт сейчас недоступен"
+        await message.answer(message_text)
+        return
+
+    already_member = getattr(source, "already_member", False)
+    audience_text = (
+        f"{source.audience:,}".replace(",", " ") if source.audience is not None else "неизвестна"
+    )
+    status = "уже подписаны" if already_member else "добавлен"
+    title = source.title or source.telegram_id
+    text = (
+        f"Источник {status}\n\n"
+        f"Название: {title}\n"
+        f"Тип: {source.source_type or 'неизвестно'}\n"
+        f"Подписчиков: {audience_text}\n"
+        f"Статус: {'🟢 включён' if source.enabled else '🔴 выключен'}"
+    )
+    if already_member:
+        text = "Вы уже подписаны на этот канал\n\n" + text.split("\n\n", 1)[1]
+    await state.clear()
+    await message.answer(text)
 
 
 @router.callback_query(F.data.startswith("notify:exclude:"))
@@ -210,9 +280,7 @@ async def notify_exclude_ask(callback: CallbackQuery):
     source_id = int(callback.data.rsplit(":", 1)[-1])
     key = (callback.message.chat.id, callback.message.message_id)
     _original_notification_keyboards[key] = callback.message.reply_markup
-    await callback.message.edit_reply_markup(
-        reply_markup=confirm_exclude_keyboard(source_id)
-    )
+    await callback.message.edit_reply_markup(reply_markup=confirm_exclude_keyboard(source_id))
     await callback.answer("Подтвердите исключение источника", show_alert=True)
 
 
@@ -228,9 +296,7 @@ async def notify_exclude_confirm(callback: CallbackQuery):
     original_markup = _original_notification_keyboards.pop(key, None)
     if original_markup is None:
         original_markup = _fallback_notification_keyboard(source_id, callback.message)
-    await callback.message.edit_reply_markup(
-        reply_markup=_strip_exclude_button(original_markup)
-    )
+    await callback.message.edit_reply_markup(reply_markup=_strip_exclude_button(original_markup))
     await callback.answer("Источник исключён")
 
 

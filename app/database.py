@@ -87,9 +87,7 @@ def _migrate_sqlite(sync_conn):
                 text("ALTER TABLE detection_mentions ADD COLUMN keyword VARCHAR(255)")
             )
         if "mention_id" not in columns:
-            sync_conn.execute(
-                text("ALTER TABLE detection_mentions ADD COLUMN mention_id INTEGER")
-            )
+            sync_conn.execute(text("ALTER TABLE detection_mentions ADD COLUMN mention_id INTEGER"))
 
 
 async def close_database():

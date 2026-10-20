@@ -97,9 +97,7 @@ class Delivery(Base):
     __tablename__ = "deliveries"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    detection_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("detections.id"), unique=True
-    )
+    detection_id: Mapped[int] = mapped_column(Integer, ForeignKey("detections.id"), unique=True)
     status: Mapped[str] = mapped_column(String(32), default="pending")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -110,9 +108,7 @@ class Delivery(Base):
     processing_started_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    delivered_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -132,9 +128,7 @@ class DetectionMention(Base):
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
-    __table_args__ = (
-        UniqueConstraint("detection_id", "mention_id", name="uq_detection_mention"),
-    )
+    __table_args__ = (UniqueConstraint("detection_id", "mention_id", name="uq_detection_mention"),)
 
 
 class StopWord(Base):

@@ -49,9 +49,7 @@ def format_notification(
     local_date = published_at.astimezone(ZoneInfo(timezone_name))
     date_text = local_date.strftime("%d.%m.%Y, %H:%M")
 
-    audience_text = (
-        f"{audience:,}".replace(",", " ") if audience is not None else "неизвестна"
-    )
+    audience_text = f"{audience:,}".replace(",", " ") if audience is not None else "неизвестна"
 
     found = ", ".join(escape(word) for word in (matches or []))
     safe_title = escape(title or "")

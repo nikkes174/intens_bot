@@ -102,14 +102,8 @@ async def mention_view(callback: CallbackQuery):
         db.expunge(mention)
     count = await _count_detections(mention.id)
     status = "🟢 Активно" if mention.enabled else "🔴 Отключено"
-    text = (
-        f"🔑 Упоминание: {mention.keyword}\n\n"
-        f"Статус: {status}\n"
-        f"Найдено публикаций: {count}"
-    )
-    await callback.message.edit_text(
-        text, reply_markup=mention_actions_keyboard(mention_id)
-    )
+    text = f"🔑 Упоминание: {mention.keyword}\n\nСтатус: {status}\nНайдено публикаций: {count}"
+    await callback.message.edit_text(text, reply_markup=mention_actions_keyboard(mention_id))
     await callback.answer()
 
 

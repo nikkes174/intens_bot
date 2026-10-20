@@ -503,9 +503,7 @@ async def _process_delivery(delivery_id: int) -> None:
                 url=payload["url"],
                 timezone_name=payload.get("timezone", settings.timezone),
             )
-            keyboard = notification_keyboard(
-                payload.get("url"), payload.get("source_id")
-            )
+            keyboard = notification_keyboard(payload.get("url"), payload.get("source_id"))
 
             admin_id = _admin_id
             if admin_id is None:
@@ -563,9 +561,7 @@ async def recover_pending_notifications() -> None:
     now = datetime.now(timezone.utc)
     stale_before = now - timedelta(minutes=5)
     async with session_scope() as db:
-        result = await db.execute(
-            select(Delivery).where(Delivery.status == "processing")
-        )
+        result = await db.execute(select(Delivery).where(Delivery.status == "processing"))
         for delivery in result.scalars().all():
             if (
                 delivery.processing_started_at is None

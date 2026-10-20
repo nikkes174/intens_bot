@@ -128,9 +128,7 @@ async def settings_account(callback: CallbackQuery):
             authorized = await client.is_user_authorized()
         except Exception:
             authorized = False
-    text = "Пользовательский аккаунт: " + (
-        "подключён" if authorized else "не подключён"
-    )
+    text = "Пользовательский аккаунт: " + ("подключён" if authorized else "не подключён")
     await callback.message.edit_text(text, reply_markup=settings_keyboard())
     await callback.answer()
 
@@ -145,9 +143,7 @@ async def stopwords_list(callback: CallbackQuery):
         items = list(result.scalars().all())
         for item in items:
             db.expunge(item)
-    await callback.message.edit_text(
-        "⛔ Стоп-слова", reply_markup=stopwords_keyboard(items)
-    )
+    await callback.message.edit_text("⛔ Стоп-слова", reply_markup=stopwords_keyboard(items))
     await callback.answer()
 
 
