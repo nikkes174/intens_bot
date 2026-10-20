@@ -191,8 +191,9 @@ async def notify_exclude_ask(callback: CallbackQuery):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
     source_id = int(callback.data.rsplit(":", 1)[-1])
+    original = callback.message.html_text or callback.message.text or ""
     await callback.message.edit_text(
-        "Исключить этот источник из мониторинга?",
+        original + "\n\n<b>Исключить этот источник из мониторинга?</b>",
         reply_markup=confirm_exclude_keyboard(source_id),
     )
     await callback.answer()

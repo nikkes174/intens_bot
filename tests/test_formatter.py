@@ -41,9 +41,18 @@ def test_truncate():
     assert len(text) <= 4096
     assert text.endswith("…")
 
+
 def test_special_chars():
     from datetime import datetime, timezone
     from app.services.formatter import format_notification
-    text = format_notification("a<b>", datetime(2026,1,1,tzinfo=timezone.utc), 1, ["q&w"], "<script>&", "https://t.me/x/1?x=1&y=2")
+
+    text = format_notification(
+        "a<b>",
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        1,
+        ["q&w"],
+        "<script>&",
+        "https://t.me/x/1?x=1&y=2",
+    )
     assert "&lt;script&gt;&amp;" in text
     assert len(text) <= 4096

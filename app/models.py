@@ -107,6 +107,9 @@ class Delivery(Base):
     next_retry_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    processing_started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     delivered_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -121,7 +124,10 @@ class DetectionMention(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     detection_id: Mapped[int] = mapped_column(Integer, ForeignKey("detections.id"))
-    mention_id: Mapped[int] = mapped_column(Integer)
+    mention_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("mentions.id", ondelete="SET NULL"), nullable=True
+    )
+    keyword: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

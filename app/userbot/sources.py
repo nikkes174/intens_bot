@@ -135,15 +135,21 @@ async def get_source_audience(client: Any, source_id: int) -> Optional[int]:
             return audience
 
     if client is not None:
+        fetched = None
         try:
             entity = await client.get_entity(source_id)
-            audience = getattr(entity, "participants_count", None)
-            if audience is None:
+            fetched = getattr(entity, "participants_count", None)
+            if fetched is None:
                 try:
                     participants = await client.get_participants(entity, limit=0)
-                    audience = getattr(participants, "total", None)
+                    fetched = getattr(participants, "total", None)
                 except Exception:
-                    audience = None
+                    fetched = None
+        except Exception:
+            fetched = None
+
+        if fetched is not None:
+            audience = fetched
             if source is not None:
                 async with session_scope() as db:
                     db_source = await db.get(Source, source.id)
@@ -151,11 +157,8 @@ async def get_source_audience(client: Any, source_id: int) -> Optional[int]:
                         db_source.audience = audience
                         db_source.audience_updated_at = datetime.now(timezone.utc)
                         await db.commit()
-        except Exception:
-            if source is not None:
-                audience = source.audience
-            else:
-                audience = None
+        elif source is not None:
+            audience = source.audience
 
     _source_cache[source_id] = {"time": now, "audience": audience}
     return audience

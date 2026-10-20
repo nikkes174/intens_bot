@@ -51,6 +51,30 @@ async def init_database():
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_migrate_sqlite)
+
+
+def _migrate_sqlite(sync_conn):
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(sync_conn)
+    tables = set(inspector.get_table_names())
+    if "deliveries" in tables:
+        columns = {col["name"] for col in inspector.get_columns("deliveries")}
+        if "processing_started_at" not in columns:
+            sync_conn.execute(
+                text("ALTER TABLE deliveries ADD COLUMN processing_started_at DATETIME")
+            )
+    if "detection_mentions" in tables:
+        columns = {col["name"] for col in inspector.get_columns("detection_mentions")}
+        if "keyword" not in columns:
+            sync_conn.execute(
+                text("ALTER TABLE detection_mentions ADD COLUMN keyword VARCHAR(255)")
+            )
+        if "mention_id" not in columns:
+            sync_conn.execute(
+                text("ALTER TABLE detection_mentions ADD COLUMN mention_id INTEGER")
+            )
 
 
 async def close_database():

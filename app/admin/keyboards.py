@@ -231,6 +231,18 @@ def stopwords_keyboard(items) -> InlineKeyboardMarkup:
                 )
             ]
         )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✏️ Изменить",
+                    callback_data=f"stopword:edit:{item.id}",
+                ),
+                InlineKeyboardButton(
+                    text="🗑 Удалить",
+                    callback_data=f"stopword:delete:{item.id}",
+                ),
+            ]
+        )
     rows.append(
         [InlineKeyboardButton(text="➕ Добавить", callback_data="stopword:add")]
     )

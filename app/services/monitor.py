@@ -196,9 +196,18 @@ async def create_detection_and_delivery(
     source_id: int,
     message_id: int,
     matches: list[str],
-    mention_ids: list[int],
     payload: dict,
+    mention_ids: Optional[list[int]] = None,
+    mention_links: Optional[list[tuple[Optional[int], str]]] = None,
 ) -> Optional[int]:
+    if mention_links is None:
+        mention_links = []
+        for index, keyword in enumerate(matches):
+            mention_id = None
+            if mention_ids and index < len(mention_ids):
+                mention_id = mention_ids[index]
+            mention_links.append((mention_id, keyword))
+
     try:
         async with session_scope() as db:
             async with db.begin():
@@ -209,11 +218,12 @@ async def create_detection_and_delivery(
                 )
                 db.add(detection)
                 await db.flush()
-                for mention_id in mention_ids:
+                for mention_id, keyword in mention_links:
                     db.add(
                         DetectionMention(
                             detection_id=detection.id,
                             mention_id=mention_id,
+                            keyword=keyword,
                         )
                     )
                 delivery = Delivery(
@@ -286,6 +296,7 @@ async def enqueue_notification(
     message_id: Optional[int] = None,
     text: Optional[str] = None,
     mention_ids: Optional[list[int]] = None,
+    mention_links: Optional[list[tuple[Optional[int], str]]] = None,
 ) -> Optional[int]:
     if matches is None:
         matches = []
@@ -306,8 +317,9 @@ async def enqueue_notification(
         source_id=source_id,
         message_id=message_id,
         matches=matches,
-        mention_ids=mention_ids,
         payload=payload,
+        mention_ids=mention_ids,
+        mention_links=mention_links,
     )
 
 
@@ -348,22 +360,23 @@ async def process_message(
                     await db.flush()
                     for keyword in matches:
                         mention = keyword_to_mention.get(normalize(keyword))
-                        if mention is not None:
-                            db.add(
-                                DetectionMention(
-                                    detection_id=detection.id,
-                                    mention_id=mention.id,
-                                )
+                        db.add(
+                            DetectionMention(
+                                detection_id=detection.id,
+                                mention_id=mention.id if mention is not None else None,
+                                keyword=keyword,
                             )
+                        )
         except IntegrityError:
             return False
         return True
 
     mention_ids = []
+    mention_links = []
     for keyword in matches:
         mention = keyword_to_mention.get(normalize(keyword))
-        if mention is not None:
-            mention_ids.append(mention.id)
+        mention_ids.append(mention.id if mention is not None else None)
+        mention_links.append((mention.id if mention is not None else None, keyword))
 
     delivery_id = await enqueue_notification(
         event=event,
@@ -372,93 +385,130 @@ async def process_message(
         message_id=message_id,
         text=text,
         mention_ids=mention_ids,
+        mention_links=mention_links,
     )
     return delivery_id is not None
 
 
+_delivery_locks: dict[int, asyncio.Lock] = {}
+_overflow_ids: list[int] = []
+_flush_task: Optional[asyncio.Task] = None
+
+
+def _get_delivery_lock(delivery_id: int) -> asyncio.Lock:
+    lock = _delivery_locks.get(delivery_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _delivery_locks[delivery_id] = lock
+    return lock
+
+
+async def _enqueue_delivery_id(delivery_id: int) -> None:
+    queue = get_queue()
+    try:
+        queue.put_nowait(delivery_id)
+    except asyncio.QueueFull:
+        _overflow_ids.append(delivery_id)
+        _ensure_flush_task()
+
+
+def _ensure_flush_task() -> None:
+    global _flush_task
+    if _flush_task is None or _flush_task.done():
+        _flush_task = asyncio.create_task(_flush_overflow())
+
+
+async def _flush_overflow() -> None:
+    global _flush_task
+    while _overflow_ids:
+        delivery_id = _overflow_ids.pop(0)
+        await get_queue().put(delivery_id)
+    _flush_task = None
+
+
 async def _process_delivery(delivery_id: int) -> None:
     settings = get_settings()
-    async with session_scope() as db:
-        delivery = await db.get(Delivery, delivery_id)
-        if delivery is None or delivery.status == "sent":
-            return
-        if delivery.next_retry_at is not None and delivery.next_retry_at > datetime.now(
-            timezone.utc
-        ):
-            delay = (
-                delivery.next_retry_at - datetime.now(timezone.utc)
-            ).total_seconds()
-            asyncio.create_task(_retry_after_delay(delivery_id, delay))
-            return
-        delivery.attempts += 1
-        attempt = delivery.attempts
-        payload_raw = delivery.payload
-        await db.commit()
-
-    if not payload_raw:
-        return
-
-    payload = json.loads(payload_raw)
-    published_at = datetime.fromisoformat(payload["published_at"])
-    if published_at.tzinfo is None:
-        published_at = published_at.replace(tzinfo=timezone.utc)
-
-    from app.admin.keyboards import notification_keyboard
-
-    text = format_notification(
-        title=payload["title"],
-        published_at=published_at,
-        audience=payload["audience"],
-        matches=payload["matches"],
-        text=payload["text"],
-        url=payload["url"],
-        timezone_name=payload.get("timezone", settings.timezone),
-    )
-    keyboard = notification_keyboard(payload.get("url"), payload.get("source_id"))
-
-    admin_id = _admin_id
-    if admin_id is None:
-        admin_id = settings.admin_id
-
-    try:
-        if _bot is None or admin_id is None or admin_id == 0:
-            raise RuntimeError("Bot or admin id is not configured")
-        await send_notification(_bot, admin_id, text, keyboard)
+    lock = _get_delivery_lock(delivery_id)
+    async with lock:
         async with session_scope() as db:
             delivery = await db.get(Delivery, delivery_id)
-            if delivery is not None:
-                delivery.status = "sent"
-                delivery.delivered_at = datetime.now(timezone.utc)
-                delivery.last_error = None
-                await db.commit()
-        return
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Notification delivery %s failed: %s", delivery_id, exc)
-        retry_after = None
-        if "RetryAfter" in type(exc).__name__ or "FloodWait" in type(exc).__name__:
-            retry_after = getattr(exc, "retry_after", None)
-            if retry_after is None:
-                retry_after = getattr(exc, "seconds", 1)
-        async with session_scope() as db:
-            delivery = await db.get(Delivery, delivery_id)
-            if delivery is not None:
-                if attempt >= settings.max_attempts:
-                    delivery.status = "failed"
-                else:
-                    delivery.status = "pending"
-                    delivery.next_retry_at = datetime.now(timezone.utc) + timedelta(
-                        seconds=retry_after if retry_after else min(2**attempt, 30)
-                    )
-                delivery.last_error = str(exc)
-                await db.commit()
-        if attempt < settings.max_attempts:
-            delay = retry_after if retry_after else min(2**attempt, 30)
-            asyncio.create_task(_retry_after_delay(delivery_id, delay))
+            if delivery is None or delivery.status == "sent":
+                return
+            now = datetime.now(timezone.utc)
+            if delivery.next_retry_at is not None and delivery.next_retry_at > now:
+                return
+            if (
+                delivery.status == "processing"
+                and delivery.processing_started_at is not None
+            ):
+                if now - delivery.processing_started_at < timedelta(minutes=5):
+                    return
+            delivery.status = "processing"
+            delivery.processing_started_at = now
+            delivery.attempts += 1
+            attempt = delivery.attempts
+            payload_raw = delivery.payload
+            await db.commit()
 
+        if not payload_raw:
+            return
 
-async def _retry_after_delay(delivery_id: int, delay: float) -> None:
-    await asyncio.sleep(delay)
-    await _enqueue_delivery_id(delivery_id)
+        payload = json.loads(payload_raw)
+        published_at = datetime.fromisoformat(payload["published_at"])
+        if published_at.tzinfo is None:
+            published_at = published_at.replace(tzinfo=timezone.utc)
+
+        from app.admin.keyboards import notification_keyboard
+
+        text = format_notification(
+            title=payload["title"],
+            published_at=published_at,
+            audience=payload["audience"],
+            matches=payload["matches"],
+            text=payload["text"],
+            url=payload["url"],
+            timezone_name=payload.get("timezone", settings.timezone),
+        )
+        keyboard = notification_keyboard(payload.get("url"), payload.get("source_id"))
+
+        admin_id = _admin_id
+        if admin_id is None:
+            admin_id = settings.admin_id
+
+        try:
+            if _bot is None or admin_id is None or admin_id == 0:
+                raise RuntimeError("Bot or admin id is not configured")
+            await send_notification(_bot, admin_id, text, keyboard)
+            async with session_scope() as db:
+                delivery = await db.get(Delivery, delivery_id)
+                if delivery is not None:
+                    delivery.status = "sent"
+                    delivery.delivered_at = datetime.now(timezone.utc)
+                    delivery.last_error = None
+                    delivery.processing_started_at = None
+                    await db.commit()
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Notification delivery %s failed: %s", delivery_id, exc)
+            retry_after = None
+            if "RetryAfter" in type(exc).__name__ or "FloodWait" in type(exc).__name__:
+                retry_after = getattr(exc, "retry_after", None)
+                if retry_after is None:
+                    retry_after = getattr(exc, "seconds", 1)
+            async with session_scope() as db:
+                delivery = await db.get(Delivery, delivery_id)
+                if delivery is not None:
+                    if attempt >= settings.max_attempts:
+                        delivery.status = "failed"
+                    else:
+                        delivery.status = "pending"
+                        delay = retry_after if retry_after else min(2**attempt, 30)
+                        delivery.next_retry_at = datetime.now(timezone.utc) + timedelta(
+                            seconds=delay
+                        )
+                    delivery.last_error = str(exc)
+                    delivery.processing_started_at = None
+                    await db.commit()
 
 
 async def notification_worker() -> None:
@@ -474,7 +524,23 @@ async def notification_worker() -> None:
 
 
 async def recover_pending_notifications() -> None:
+    now = datetime.now(timezone.utc)
+    stale_before = now - timedelta(minutes=5)
     async with session_scope() as db:
+        result = await db.execute(
+            select(Delivery).where(Delivery.status == "processing")
+        )
+        for delivery in result.scalars().all():
+            if (
+                delivery.processing_started_at is None
+                or delivery.processing_started_at < stale_before
+            ):
+                delivery.status = "pending"
+                delivery.processing_started_at = None
+                if delivery.next_retry_at is None:
+                    delivery.next_retry_at = now
+        await db.commit()
+
         result = await db.execute(
             select(Delivery).where(Delivery.status.in_(["pending", "failed"]))
         )
@@ -482,4 +548,15 @@ async def recover_pending_notifications() -> None:
     for delivery in deliveries:
         if delivery.attempts >= get_settings().max_attempts:
             continue
+        if delivery.next_retry_at is not None and delivery.next_retry_at > now:
+            continue
         await _enqueue_delivery_id(delivery.id)
+
+
+async def periodic_recovery(interval: int = 10) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await recover_pending_notifications()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Periodic recovery error: %s", exc)

@@ -3,7 +3,12 @@ from __future__ import annotations
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from app.admin.keyboards import (
     settings_keyboard,
@@ -29,6 +34,7 @@ router = Router()
 class SettingsStates(StatesGroup):
     waiting_for_timezone = State()
     waiting_for_stopword = State()
+    waiting_for_stopword_edit = State()
 
 
 @router.callback_query(F.data == "settings:show")
@@ -186,4 +192,82 @@ async def stopword_view(callback: CallbackQuery):
         item.enabled = not item.enabled
         await db.commit()
     await callback.answer("Готово")
+    await stopwords_list(callback)
+
+
+@router.callback_query(F.data.startswith("stopword:edit:"))
+async def stopword_edit(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    stopword_id = int(callback.data.rsplit(":", 1)[-1])
+    async with session_scope() as db:
+        item = await db.get(StopWord, stopword_id)
+        if item is None:
+            await callback.answer("Не найдено", show_alert=True)
+            return
+    await state.set_state(SettingsStates.waiting_for_stopword_edit)
+    await state.update_data(stopword_id=stopword_id)
+    await callback.message.edit_text(f"Текущее стоп-слово: {item.word}\nВведите новое:")
+    await callback.answer()
+
+
+@router.message(SettingsStates.waiting_for_stopword_edit)
+async def process_stopword_edit(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    stopword_id = data.get("stopword_id")
+    word = (message.text or "").strip()
+    if not word:
+        await message.answer("Пустое значение.")
+        return
+    async with session_scope() as db:
+        item = await db.get(StopWord, stopword_id)
+        if item is None:
+            await message.answer("Не найдено.")
+            await state.clear()
+            return
+        item.word = word
+        await db.commit()
+    await state.clear()
+    await message.answer(f"Стоп-слово изменено: {word}")
+
+
+@router.callback_query(F.data.startswith("stopword:delete:"))
+async def stopword_delete_ask(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    stopword_id = int(callback.data.rsplit(":", 1)[-1])
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Да, удалить",
+                    callback_data=f"stopword:delete_confirm:{stopword_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="stopwords:list",
+                ),
+            ]
+        ]
+    )
+    await callback.message.edit_text("Удалить стоп-слово?", reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("stopword:delete_confirm:"))
+async def stopword_delete_confirm(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    stopword_id = int(callback.data.rsplit(":", 1)[-1])
+    async with session_scope() as db:
+        item = await db.get(StopWord, stopword_id)
+        if item is not None:
+            await db.delete(item)
+            await db.commit()
+    await callback.answer("Удалено")
     await stopwords_list(callback)

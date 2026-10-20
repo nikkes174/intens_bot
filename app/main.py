@@ -9,6 +9,7 @@ from app.database import init_database, close_database
 from app.services.monitor import (
     configure,
     notification_worker,
+    periodic_recovery,
     recover_pending_notifications,
 )
 from app.userbot import sources as source_service
@@ -19,10 +20,14 @@ from app.services.monitor import process_message
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+_stopping = False
+
 
 async def _run_telethon(client) -> None:
+    global _stopping
     backoff = 1
-    while True:
+    max_backoff = 60
+    while not _stopping:
         try:
             await client.connect()
             if not await client.is_user_authorized():
@@ -32,8 +37,13 @@ async def _run_telethon(client) -> None:
             logger.info("Telethon connected")
             await recover_pending_notifications()
             await client.run_until_disconnected()
-            logger.info("Telethon disconnected")
-            return
+            if _stopping:
+                logger.info("Telethon stopped")
+                return
+            logger.warning("Telethon disconnected unexpectedly, reconnecting")
+            backoff = 1
+        except asyncio.CancelledError:
+            raise
         except RuntimeError:
             raise
         except Exception as exc:
@@ -42,11 +52,14 @@ async def _run_telethon(client) -> None:
                 await client.disconnect()
             except Exception:
                 pass
+            if _stopping:
+                return
             await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 60)
+            backoff = min(backoff * 2, max_backoff)
 
 
 async def main() -> None:
+    global _stopping
     settings = get_settings()
     await init_database()
 
@@ -63,6 +76,7 @@ async def main() -> None:
     register_handlers(client, process_message)
 
     worker_task = asyncio.create_task(notification_worker())
+    recovery_task = asyncio.create_task(periodic_recovery())
     telethon_task = asyncio.create_task(_run_telethon(client))
     polling_task = asyncio.create_task(dispatcher.start_polling(bot))
 
@@ -75,16 +89,16 @@ async def main() -> None:
             exc = task.exception()
             if exc is not None:
                 raise exc
-        # If telethon finishes normally, keep polling until cancelled externally.
         if telethon_task in done and not telethon_task.cancelled():
             await polling_task
     except Exception as exc:
         logger.exception("Application stopped: %s", exc)
         raise
     finally:
-        for task in (worker_task, telethon_task, polling_task):
+        _stopping = True
+        for task in (worker_task, recovery_task, telethon_task, polling_task):
             task.cancel()
-        for task in (worker_task, telethon_task, polling_task):
+        for task in (worker_task, recovery_task, telethon_task, polling_task):
             try:
                 await task
             except (asyncio.CancelledError, Exception):
