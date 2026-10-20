@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -6,6 +7,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy import event
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase
 
 from app.config import get_settings
@@ -23,6 +25,11 @@ def get_engine():
     global _engine
     if _engine is None:
         settings = get_settings()
+        url = make_url(settings.database_url)
+        if url.get_backend_name().startswith("sqlite"):
+            database = url.database
+            if database and database != ":memory:":
+                Path(database).parent.mkdir(parents=True, exist_ok=True)
         _engine = create_async_engine(
             settings.database_url,
             echo=False,

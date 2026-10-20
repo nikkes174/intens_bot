@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -222,11 +224,25 @@ async def notify_exclude_confirm(callback: CallbackQuery):
     source_id = int(callback.data.rsplit(":", 1)[-1])
     await source_service.set_source_excluded(source_id, True)
     key = (callback.message.chat.id, callback.message.message_id)
+    source_id = int(callback.data.rsplit(":", 1)[-1])
     original_markup = _original_notification_keyboards.pop(key, None)
+    if original_markup is None:
+        original_markup = _fallback_notification_keyboard(source_id, callback.message)
     await callback.message.edit_reply_markup(
         reply_markup=_strip_exclude_button(original_markup)
     )
     await callback.answer("Источник исключён")
+
+
+def _fallback_notification_keyboard(source_id: int, message):
+    from app.admin.keyboards import notification_keyboard
+
+    url = None
+    text = message.html_text or message.text or ""
+    match = re.search(r"🔗\s*(https?://\S+)", text)
+    if match:
+        url = match.group(1)
+    return notification_keyboard(url, source_id, show_exclude=True)
 
 
 @router.callback_query(F.data.startswith("notify:exclude_cancel:"))
@@ -237,6 +253,7 @@ async def notify_exclude_cancel(callback: CallbackQuery):
     key = (callback.message.chat.id, callback.message.message_id)
     original_markup = _original_notification_keyboards.pop(key, None)
     if original_markup is None:
-        original_markup = callback.message.reply_markup
+        source_id = int(callback.data.rsplit(":", 1)[-1])
+        original_markup = _fallback_notification_keyboard(source_id, callback.message)
     await callback.message.edit_reply_markup(reply_markup=original_markup)
     await callback.answer("Отменено")

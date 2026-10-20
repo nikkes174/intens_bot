@@ -1,38 +1,38 @@
 ﻿# Telegram monitor
 
-## Environment
+## Local Windows setup with uv
 
-Copy `.env.example` to `.env` and fill it.
+1. Install uv.
+2. Copy `.env.example` to `.env` and fill `BOT_TOKEN`, `ADMIN_ID`, `API_ID`, `API_HASH`.
+3. Sync dependencies:
 
-Required:
-
-- `BOT_TOKEN`
-- `ADMIN_ID`
-- `API_ID`
-- `API_HASH`
-
-## First authorization
-
-With Python installed locally:
-
-```bash
-python scripts/login.py
+```powershell
+uv sync
 ```
 
-Without Python on the server, run authorization in Docker:
+4. Authorize Telethon:
 
-```bash
-docker compose run --rm app python scripts/login.py
+```powershell
+uv run python -m scripts.login
 ```
 
-## Run
+5. Run the application:
 
-```bash
+```powershell
+uv run python -m app.main
+```
+
+Checks:
+
+```powershell
+uv run python -m compileall -q app scripts tests
+uv run pytest -q
+```
+
+## Docker (VPS)
+
+```powershell
 docker compose up -d --build
 ```
-
-Restart after reboot is handled by `restart: unless-stopped`.
-
-## Admin bot
 
 Send `/start` to the bot from the configured `ADMIN_ID` account.

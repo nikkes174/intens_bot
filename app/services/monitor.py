@@ -441,11 +441,11 @@ async def _process_delivery(delivery_id: int) -> None:
             now = datetime.now(timezone.utc)
             if delivery.next_retry_at is not None and delivery.next_retry_at > now:
                 return
-            if (
-                delivery.status == "processing"
-                and delivery.processing_started_at is not None
-            ):
-                if now - delivery.processing_started_at < timedelta(minutes=5):
+            started_at = delivery.processing_started_at
+            if started_at is not None and started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            if delivery.status == "processing" and started_at is not None:
+                if now - started_at < timedelta(minutes=5):
                     return
             delivery.status = "processing"
             delivery.processing_started_at = now
@@ -466,18 +466,30 @@ async def _process_delivery(delivery_id: int) -> None:
 
         try:
             payload = json.loads(payload_raw)
-        except (TypeError, ValueError) as exc:
+            for required_field in (
+                "source_id",
+                "title",
+                "matches",
+                "text",
+                "published_at",
+            ):
+                if required_field not in payload:
+                    raise ValueError(f"Missing field: {required_field}")
+            if not isinstance(payload.get("matches"), list):
+                raise ValueError("Field 'matches' must be a list")
+            published_at = datetime.fromisoformat(payload["published_at"])
+            if published_at.tzinfo is None:
+                published_at = published_at.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError, KeyError) as exc:
             async with session_scope() as db:
                 delivery = await db.get(Delivery, delivery_id)
                 if delivery is not None:
                     delivery.status = "failed"
                     delivery.last_error = f"Invalid notification payload: {exc}"
                     delivery.processing_started_at = None
+                    delivery.next_retry_at = None
                     await db.commit()
             return
-        published_at = datetime.fromisoformat(payload["published_at"])
-        if published_at.tzinfo is None:
-            published_at = published_at.replace(tzinfo=timezone.utc)
 
         from app.admin.keyboards import notification_keyboard
 
@@ -566,7 +578,7 @@ async def recover_pending_notifications() -> None:
         await db.commit()
 
         result = await db.execute(
-            select(Delivery).where(Delivery.status.in_(["pending", "failed"]))
+            select(Delivery).where(Delivery.status.in_(["pending", "processing"]))
         )
         deliveries = result.scalars().all()
     for delivery in deliveries:
