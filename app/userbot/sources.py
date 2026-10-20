@@ -266,10 +266,25 @@ def parse_source_link(text: str):
             return ("public", username)
         return None
 
-    match = re.search(r"(?:https?://)?(?:t|telegram)\.me/([^\s?#]+)", value, re.IGNORECASE)
-    if not match:
+    from urllib.parse import urlparse, unquote
+
+    candidate = value
+    lowered = candidate.lower()
+    if "://" not in candidate and not lowered.startswith(
+        ("t.me/", "www.t.me/", "telegram.me/", "www.telegram.me/")
+    ):
         return None
-    path = match.group(1).strip("/")
+    if "://" not in candidate:
+        candidate = "https://" + candidate
+    parsed = urlparse(candidate)
+    if parsed.scheme not in ("", "http", "https"):
+        return None
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host not in {"t.me", "telegram.me"}:
+        return None
+    path = unquote(parsed.path or "").strip("/")
     if not path:
         return None
     segments = [segment for segment in path.split("/") if segment]
@@ -277,20 +292,21 @@ def parse_source_link(text: str):
         return None
     if segments[0].startswith("+"):
         invite_hash = segments[0][1:]
-        if invite_hash:
+        if invite_hash and len(segments) == 1:
             return ("invite", invite_hash)
         return None
     if segments[0] == "joinchat":
-        if len(segments) < 2:
+        if len(segments) != 2:
             return None
         invite_hash = segments[1]
-        if not invite_hash or "/" in invite_hash:
+        if not invite_hash:
             return None
         return ("invite", invite_hash)
-    if len(segments) == 1:
-        username = segments[0]
-        if _USERNAME_RE.match(username):
-            return ("public", username)
+    if len(segments) != 1:
+        return None
+    username = segments[0]
+    if _USERNAME_RE.match(username):
+        return ("public", username)
     return None
 
 
@@ -392,19 +408,8 @@ async def join_source(client, link: str):
                     raise
             if entity is None:
                 raise ValueError("not found")
-            if not (
-                getattr(entity, "broadcast", False)
-                or getattr(entity, "megagroup", False)
-                or getattr(entity, "id", None)
-            ):
-                raise ValueError("not a channel")
-            if not already_member:
-                try:
-                    await client(JoinChannelRequest(entity))
-                except telethon_errors.UserAlreadyParticipantError:
-                    already_member = True
-                except telethon_errors.InviteRequestSentError:
-                    raise
+            if getattr(entity, "id", None) is None:
+                raise ValueError("not found")
 
         source = await ensure_source_from_entity(client, entity)
         source.already_member = already_member
