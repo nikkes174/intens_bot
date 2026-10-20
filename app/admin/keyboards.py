@@ -150,18 +150,21 @@ def source_actions_keyboard(source_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def notification_keyboard(url: Optional[str], source_id: int) -> InlineKeyboardMarkup:
+def notification_keyboard(
+    url: Optional[str], source_id: int, show_exclude: bool = True
+) -> InlineKeyboardMarkup:
     rows = []
     if url:
         rows.append([InlineKeyboardButton(text="🔗 Открыть публикацию", url=url)])
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="🚫 Исключить источник",
-                callback_data=f"notify:exclude:{source_id}",
-            )
-        ]
-    )
+    if show_exclude:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🚫 Исключить источник",
+                    callback_data=f"notify:exclude:{source_id}",
+                )
+            ]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -173,7 +176,9 @@ def confirm_exclude_keyboard(source_id: int) -> InlineKeyboardMarkup:
                     text="✅ Да, исключить",
                     callback_data=f"notify:exclude_confirm:{source_id}",
                 ),
-                InlineKeyboardButton(text="❌ Отмена", callback_data="menu:main"),
+                InlineKeyboardButton(
+                    text="❌ Отмена", callback_data=f"notify:exclude_cancel:{source_id}"
+                ),
             ]
         ]
     )

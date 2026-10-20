@@ -393,6 +393,7 @@ async def process_message(
 _delivery_locks: dict[int, asyncio.Lock] = {}
 _overflow_ids: list[int] = []
 _flush_task: Optional[asyncio.Task] = None
+_queued_ids: set[int] = set()
 
 
 def _get_delivery_lock(delivery_id: int) -> asyncio.Lock:
@@ -404,6 +405,9 @@ def _get_delivery_lock(delivery_id: int) -> asyncio.Lock:
 
 
 async def _enqueue_delivery_id(delivery_id: int) -> None:
+    if delivery_id in _queued_ids:
+        return
+    _queued_ids.add(delivery_id)
     queue = get_queue()
     try:
         queue.put_nowait(delivery_id)
@@ -451,31 +455,50 @@ async def _process_delivery(delivery_id: int) -> None:
             await db.commit()
 
         if not payload_raw:
+            async with session_scope() as db:
+                delivery = await db.get(Delivery, delivery_id)
+                if delivery is not None:
+                    delivery.status = "failed"
+                    delivery.last_error = "Missing notification payload"
+                    delivery.processing_started_at = None
+                    await db.commit()
             return
 
-        payload = json.loads(payload_raw)
+        try:
+            payload = json.loads(payload_raw)
+        except (TypeError, ValueError) as exc:
+            async with session_scope() as db:
+                delivery = await db.get(Delivery, delivery_id)
+                if delivery is not None:
+                    delivery.status = "failed"
+                    delivery.last_error = f"Invalid notification payload: {exc}"
+                    delivery.processing_started_at = None
+                    await db.commit()
+            return
         published_at = datetime.fromisoformat(payload["published_at"])
         if published_at.tzinfo is None:
             published_at = published_at.replace(tzinfo=timezone.utc)
 
         from app.admin.keyboards import notification_keyboard
 
-        text = format_notification(
-            title=payload["title"],
-            published_at=published_at,
-            audience=payload["audience"],
-            matches=payload["matches"],
-            text=payload["text"],
-            url=payload["url"],
-            timezone_name=payload.get("timezone", settings.timezone),
-        )
-        keyboard = notification_keyboard(payload.get("url"), payload.get("source_id"))
-
-        admin_id = _admin_id
-        if admin_id is None:
-            admin_id = settings.admin_id
-
         try:
+            text = format_notification(
+                title=payload["title"],
+                published_at=published_at,
+                audience=payload["audience"],
+                matches=payload["matches"],
+                text=payload["text"],
+                url=payload["url"],
+                timezone_name=payload.get("timezone", settings.timezone),
+            )
+            keyboard = notification_keyboard(
+                payload.get("url"), payload.get("source_id")
+            )
+
+            admin_id = _admin_id
+            if admin_id is None:
+                admin_id = settings.admin_id
+
             if _bot is None or admin_id is None or admin_id == 0:
                 raise RuntimeError("Bot or admin id is not configured")
             await send_notification(_bot, admin_id, text, keyboard)
@@ -520,6 +543,7 @@ async def notification_worker() -> None:
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("Notification worker error: %s", exc)
         finally:
+            _queued_ids.discard(delivery_id)
             queue.task_done()
 
 
@@ -546,6 +570,8 @@ async def recover_pending_notifications() -> None:
         )
         deliveries = result.scalars().all()
     for delivery in deliveries:
+        if delivery.id in _queued_ids:
+            continue
         if delivery.attempts >= get_settings().max_attempts:
             continue
         if delivery.next_retry_at is not None and delivery.next_retry_at > now:
