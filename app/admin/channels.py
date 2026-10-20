@@ -1,31 +1,100 @@
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, Message
 
-from app.admin.keyboards import sources_keyboard, source_actions_keyboard
+from app.admin.keyboards import (
+    sources_keyboard,
+    source_actions_keyboard,
+    confirm_exclude_keyboard,
+)
 from app.config import is_admin
 from app.database import session_scope
 from app.models import Source
+import app.services.monitor as monitor_module
 from app.userbot import sources as source_service
 
-
 router = Router()
+PAGE_SIZE = 12
+SOURCE_SEARCH = "source_search"
 
 
-async def show_sources(callback: CallbackQuery):
-    items = await source_service.list_sources()
-    text = "📡 Каналы и группы" if items else "Источники пока не обнаружены."
-    await callback.message.edit_text(text, reply_markup=sources_keyboard(items))
+class SourceStates(StatesGroup):
+    waiting_for_search = State()
+
+
+async def _show_sources(callback: CallbackQuery, page: int = 0, search: str = ""):
+    total = await source_service.count_sources(search or None)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    items = await source_service.list_sources(
+        limit=PAGE_SIZE, offset=page * PAGE_SIZE, search=search or None
+    )
+    text = "📡 Каналы и группы" if items else "Источники не найдены."
+    if search:
+        text += f"\nПоиск: {search}"
+    await callback.message.edit_text(
+        text, reply_markup=sources_keyboard(items, page, total_pages, search)
+    )
 
 
 @router.callback_query(F.data == "sources:list")
-async def sources_list(callback: CallbackQuery):
+async def sources_list(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
-    await show_sources(callback)
+    await state.clear()
+    await _show_sources(callback, 0, "")
     await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"sources:list:\d+"))
+async def sources_page(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    data = await state.get_data()
+    search = data.get(SOURCE_SEARCH, "")
+    page = int(callback.data.rsplit(":", 1)[-1])
+    await _show_sources(callback, page, search)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sources:search")
+async def sources_search(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    await state.set_state(SourceStates.waiting_for_search)
+    await callback.message.edit_text("Введите часть названия источника:")
+    await callback.answer()
+
+
+@router.message(SourceStates.waiting_for_search)
+async def process_source_search(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    search = (message.text or "").strip()
+    await state.update_data(**{SOURCE_SEARCH: search})
+    await state.set_state(None)
+    # Reuse a fake callback-like edit by sending new message with keyboard.
+    total = await source_service.count_sources(search or None)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    items = await source_service.list_sources(
+        limit=PAGE_SIZE, offset=0, search=search or None
+    )
+    text = "📡 Каналы и группы"
+    if search:
+        text += f"\nПоиск: {search}"
+    if not items:
+        text = "Источники не найдены."
+    from app.admin.keyboards import sources_keyboard
+
+    await message.answer(
+        text, reply_markup=sources_keyboard(items, 0, total_pages, search)
+    )
 
 
 @router.callback_query(F.data.startswith("source:view:"))
@@ -33,9 +102,9 @@ async def source_view(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
-    source_id = int(callback.data.rsplit(":", 1)[-1])
+    source_db_id = int(callback.data.rsplit(":", 1)[-1])
     async with session_scope() as db:
-        source = await db.get(Source, source_id)
+        source = await db.get(Source, source_db_id)
         if source is None:
             await callback.answer("Не найдено", show_alert=True)
             return
@@ -69,10 +138,9 @@ async def source_toggle(callback: CallbackQuery):
         if source is None:
             await callback.answer("Не найдено", show_alert=True)
             return
-        source.enabled = not source.enabled
+        new_state = not source.enabled
         telegram_id = source.telegram_id
-        await db.commit()
-    await source_service.set_source_enabled(telegram_id, source.enabled)
+    await source_service.set_source_enabled(telegram_id, new_state)
     await callback.answer("Готово")
     await source_view(callback)
 
@@ -89,9 +157,7 @@ async def source_exclude(callback: CallbackQuery):
             await callback.answer("Не найдено", show_alert=True)
             return
         new_state = not source.excluded
-        source.excluded = new_state
         telegram_id = source.telegram_id
-        await db.commit()
     await source_service.set_source_excluded(telegram_id, new_state)
     await callback.answer("Готово")
     await source_view(callback)
@@ -102,8 +168,6 @@ async def source_refresh(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
-    from app.userbot.client import create_telethon_client
-
     source_db_id = int(callback.data.rsplit(":", 1)[-1])
     async with session_scope() as db:
         source = await db.get(Source, source_db_id)
@@ -111,14 +175,35 @@ async def source_refresh(callback: CallbackQuery):
             await callback.answer("Не найдено", show_alert=True)
             return
         telegram_id = source.telegram_id
-    client = create_telethon_client()
-    await client.connect()
-    try:
-        audience = await source_service.get_source_audience(client, telegram_id)
-        source_service.invalidate_source_cache(telegram_id)
-    finally:
-        await client.disconnect()
+    service = source_service.get_source_service()
+    if monitor_module._client is not None:
+        service.client = monitor_module._client
+    audience = await service.refresh_audience(telegram_id)
     await callback.answer(
         f"Аудитория: {audience if audience is not None else 'неизвестна'}"
     )
     await source_view(callback)
+
+
+@router.callback_query(F.data.startswith("notify:exclude:"))
+async def notify_exclude_ask(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    source_id = int(callback.data.rsplit(":", 1)[-1])
+    await callback.message.edit_text(
+        "Исключить этот источник из мониторинга?",
+        reply_markup=confirm_exclude_keyboard(source_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("notify:exclude_confirm:"))
+async def notify_exclude_confirm(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    source_id = int(callback.data.rsplit(":", 1)[-1])
+    await source_service.set_source_excluded(source_id, True)
+    await callback.answer("Источник исключён")
+    await callback.message.edit_text("Источник исключён.")

@@ -11,6 +11,7 @@ from app.services.monitor import (
     notification_worker,
     recover_pending_notifications,
 )
+from app.userbot import sources as source_service
 from app.userbot.client import create_telethon_client
 from app.userbot.handlers import register_handlers
 from app.services.monitor import process_message
@@ -19,44 +20,83 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+async def _run_telethon(client) -> None:
+    backoff = 1
+    while True:
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                raise RuntimeError(
+                    "Telethon session is not authorized. Run scripts/login.py first."
+                )
+            logger.info("Telethon connected")
+            await recover_pending_notifications()
+            await client.run_until_disconnected()
+            logger.info("Telethon disconnected")
+            return
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.warning("Telethon connection error: %s", exc)
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+
+
 async def main() -> None:
     settings = get_settings()
     await init_database()
 
     bot = create_admin_bot()
     dispatcher = create_dispatcher()
-
     client = create_telethon_client()
+    source_service.set_client(client)
     configure(
         bot=bot,
-        admin_id=settings.admin_ids[0] if settings.admin_ids else None,
+        admin_id=settings.admin_id,
         client=client,
     )
 
     register_handlers(client, process_message)
 
-    await client.connect()
-    if not await client.is_user_authorized():
-        raise RuntimeError(
-            "Telethon session is not authorized. Run scripts/login.py first."
-        )
-
-    await recover_pending_notifications()
     worker_task = asyncio.create_task(notification_worker())
+    telethon_task = asyncio.create_task(_run_telethon(client))
+    polling_task = asyncio.create_task(dispatcher.start_polling(bot))
 
     try:
-        await asyncio.gather(
-            dispatcher.start_polling(bot),
-            client.run_until_disconnected(),
+        done, pending = await asyncio.wait(
+            {worker_task, telethon_task, polling_task},
+            return_when=asyncio.FIRST_EXCEPTION,
         )
+        for task in done:
+            exc = task.exception()
+            if exc is not None:
+                raise exc
+        # If telethon finishes normally, keep polling until cancelled externally.
+        if telethon_task in done and not telethon_task.cancelled():
+            await polling_task
+    except Exception as exc:
+        logger.exception("Application stopped: %s", exc)
+        raise
     finally:
-        worker_task.cancel()
+        for task in (worker_task, telethon_task, polling_task):
+            task.cancel()
+        for task in (worker_task, telethon_task, polling_task):
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
         try:
-            await worker_task
-        except asyncio.CancelledError:
+            await client.disconnect()
+        except Exception:
             pass
-        await client.disconnect()
-        await bot.session.close()
+        try:
+            await bot.session.close()
+        except Exception:
+            pass
         await close_database()
 
 

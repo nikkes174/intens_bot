@@ -10,8 +10,31 @@ from app.database import session_scope
 from app.models import Exclusion, Source
 
 
-AUDIENCE_TTL = timedelta(minutes=10)
+AUDIENCE_TTL = timedelta(hours=6)
 _source_cache: dict[int, dict[str, Any]] = {}
+_client = None
+
+
+class SourceService:
+    def __init__(self, client=None):
+        self.client = client
+
+    async def refresh_audience(self, source_id: int) -> Optional[int]:
+        invalidate_source_cache(source_id)
+        return await get_source_audience(self.client, source_id)
+
+
+def set_client(client) -> None:
+    global _client
+    _client = client
+
+
+def get_client():
+    return _client
+
+
+def get_source_service() -> "SourceService":
+    return SourceService(_client)
 
 
 def public_post_url(username: Optional[str], message_id: int) -> Optional[str]:
@@ -99,13 +122,19 @@ async def get_source_type(source_id: int) -> Optional[str]:
 async def get_source_audience(client: Any, source_id: int) -> Optional[int]:
     cached = _source_cache.get(source_id)
     now = time.monotonic()
-    if cached and now - cached["time"] < AUDIENCE_TTL.total_seconds():
+    if cached and now - cached["time"] < 60:
         return cached["audience"]
 
     source = await get_source(source_id)
     audience = source.audience if source else None
+    updated_at = source.audience_updated_at if source else None
+    if audience is not None and updated_at is not None:
+        age = datetime.now(timezone.utc) - updated_at
+        if age < AUDIENCE_TTL:
+            _source_cache[source_id] = {"time": now, "audience": audience}
+            return audience
 
-    if audience is None and client is not None:
+    if client is not None:
         try:
             entity = await client.get_entity(source_id)
             audience = getattr(entity, "participants_count", None)
@@ -115,16 +144,18 @@ async def get_source_audience(client: Any, source_id: int) -> Optional[int]:
                     audience = getattr(participants, "total", None)
                 except Exception:
                     audience = None
+            if source is not None:
+                async with session_scope() as db:
+                    db_source = await db.get(Source, source.id)
+                    if db_source is not None:
+                        db_source.audience = audience
+                        db_source.audience_updated_at = datetime.now(timezone.utc)
+                        await db.commit()
         except Exception:
-            audience = None
-
-        if source is not None:
-            async with session_scope() as db:
-                db_source = await db.get(Source, source.id)
-                if db_source is not None:
-                    db_source.audience = audience
-                    db_source.audience_updated_at = datetime.now(timezone.utc)
-                    await db.commit()
+            if source is not None:
+                audience = source.audience
+            else:
+                audience = None
 
     _source_cache[source_id] = {"time": now, "audience": audience}
     return audience
@@ -137,13 +168,32 @@ def invalidate_source_cache(source_id: Optional[int] = None) -> None:
         _source_cache.pop(source_id, None)
 
 
-async def list_sources() -> list[Source]:
+async def list_sources(
+    limit: Optional[int] = None, offset: int = 0, search: Optional[str] = None
+) -> list[Source]:
     async with session_scope() as db:
-        result = await db.execute(select(Source).order_by(Source.id))
+        query = select(Source).order_by(Source.id)
+        if search:
+            query = query.where(Source.title.ilike(f"%{search}%"))
+        if offset:
+            query = query.offset(offset)
+        if limit is not None:
+            query = query.limit(limit)
+        result = await db.execute(query)
         sources = list(result.scalars().all())
         for source in sources:
             db.expunge(source)
         return sources
+
+
+async def count_sources(search: Optional[str] = None) -> int:
+    from sqlalchemy import func
+
+    async with session_scope() as db:
+        query = select(func.count()).select_from(Source)
+        if search:
+            query = query.where(Source.title.ilike(f"%{search}%"))
+        return int(await db.scalar(query) or 0)
 
 
 async def set_source_enabled(source_id: int, enabled: bool) -> None:
@@ -157,32 +207,23 @@ async def set_source_enabled(source_id: int, enabled: bool) -> None:
 
 async def set_source_excluded(source_id: int, excluded: bool) -> None:
     async with session_scope() as db:
-        result = await db.execute(select(Source).where(Source.telegram_id == source_id))
-        source = result.scalar_one_or_none()
-        if source is not None:
-            source.excluded = excluded
-            await db.commit()
-        if excluded:
+        async with db.begin():
+            result = await db.execute(
+                select(Source).where(Source.telegram_id == source_id)
+            )
+            source = result.scalar_one_or_none()
+            if source is not None:
+                source.excluded = excluded
             from app.models import Exclusion
 
-            async with session_scope() as db2:
-                existing = await db2.execute(
-                    select(Exclusion).where(Exclusion.source_telegram_id == source_id)
-                )
-                if existing.scalar_one_or_none() is None:
-                    db2.add(Exclusion(source_telegram_id=source_id))
-                    await db2.commit()
-        else:
-            from app.models import Exclusion
-
-            async with session_scope() as db2:
-                existing = await db2.execute(
-                    select(Exclusion).where(Exclusion.source_telegram_id == source_id)
-                )
-                exc = existing.scalar_one_or_none()
-                if exc is not None:
-                    await db2.delete(exc)
-                    await db2.commit()
+            existing_result = await db.execute(
+                select(Exclusion).where(Exclusion.source_telegram_id == source_id)
+            )
+            existing = existing_result.scalar_one_or_none()
+            if excluded and existing is None:
+                db.add(Exclusion(source_telegram_id=source_id))
+            if not excluded and existing is not None:
+                await db.delete(existing)
 
 
 async def is_excluded(source_id: int) -> bool:

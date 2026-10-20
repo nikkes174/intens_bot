@@ -15,7 +15,7 @@ from app.admin.keyboards import (
 )
 from app.config import is_admin
 from app.database import session_scope
-from app.models import Detection, Mention
+from app.models import DetectionMention, Mention
 from app.services.matcher import normalize
 
 
@@ -28,17 +28,12 @@ router = Router()
 PAGE_SIZE = 10
 
 
-async def _count_detections(keyword: str) -> int:
+async def _count_detections(mention_id: int) -> int:
     async with session_scope() as db:
-        result = await db.execute(select(Detection))
-        target = normalize(keyword)
-        count = 0
-        for detection in result.scalars().all():
-            for part in (detection.matched_keywords or "").split(","):
-                if normalize(part.strip()) == target:
-                    count += 1
-                    break
-        return count
+        result = await db.execute(
+            select(DetectionMention).where(DetectionMention.mention_id == mention_id)
+        )
+        return len(result.scalars().all())
 
 
 async def _keyword_exists(keyword: str, exclude_id: Optional[int] = None) -> bool:
@@ -105,7 +100,7 @@ async def mention_view(callback: CallbackQuery):
             await callback.answer("Не найдено", show_alert=True)
             return
         db.expunge(mention)
-    count = await _count_detections(mention.keyword)
+    count = await _count_detections(mention.id)
     status = "🟢 Активно" if mention.enabled else "🔴 Отключено"
     text = (
         f"🔑 Упоминание: {mention.keyword}\n\n"

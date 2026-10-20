@@ -50,8 +50,11 @@ async def test_process_message_duplicate_event(monkeypatch):
     async def keywords():
         return ["foo"]
 
+    calls = {"n": 0}
+
     async def fake_enqueue(**kwargs):
-        return 1
+        calls["n"] += 1
+        return 1 if calls["n"] == 1 else None
 
     monkeypatch.setattr("app.services.monitor.monitoring_enabled", mon)
     monkeypatch.setattr("app.services.monitor.source_allowed", allowed)

@@ -7,8 +7,34 @@ from zoneinfo import ZoneInfo
 
 from app.userbot.sources import public_post_url  # noqa: F401
 
-
 MAX_MESSAGE_LENGTH = 4096
+
+
+def _truncate_raw(text: str, available: int) -> str:
+    if available <= 0:
+        return ""
+    if len(escape(text)) <= available:
+        return text
+    lo, hi = 0, len(text)
+    best = 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = text[:mid]
+        if mid < len(text):
+            candidate += "…"
+        if len(escape(candidate)) <= available:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    result = text[:best]
+    if best < len(text):
+        result += "…"
+    while result and len(escape(result)) > available:
+        result = result[:-1]
+        if result and not result.endswith("…") and best < len(text):
+            result += "…"
+    return result
 
 
 def format_notification(
@@ -29,7 +55,6 @@ def format_notification(
 
     found = ", ".join(escape(word) for word in (matches or []))
     safe_title = escape(title or "")
-    safe_text = escape(text or "")
 
     head = (
         f"🌐 <b>Telegram — «{safe_title}»</b>\n"
@@ -42,10 +67,11 @@ def format_notification(
     available = MAX_MESSAGE_LENGTH - len(head) - len(tail)
     if available < 0:
         available = 0
-    if len(safe_text) > available:
-        if available <= 1:
-            safe_text = ""
-        else:
-            safe_text = safe_text[: available - 1].rstrip() + "…"
+    truncated_raw = _truncate_raw(text or "", available)
+    safe_text = escape(truncated_raw)
+
+    # Final safety trim, should not normally trigger.
+    while len(head) + len(safe_text) + len(tail) > MAX_MESSAGE_LENGTH and safe_text:
+        safe_text = safe_text[:-1]
 
     return head + safe_text + tail
