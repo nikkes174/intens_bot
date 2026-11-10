@@ -36,6 +36,10 @@ async def reset_db():
 
     async with get_engine().begin() as conn:
         for table in (
+            "web_deliveries",
+            "web_detections",
+            "web_article_records",
+            "web_watches",
             "deliveries",
             "detections",
             "exclusions",
@@ -44,4 +48,5 @@ async def reset_db():
             "settings",
         ):
             await conn.execute(text(f"DELETE FROM {table}"))
+        await conn.execute(text("DELETE FROM settings WHERE key LIKE 'web_%'"))
     await close_database()

@@ -16,6 +16,13 @@ from app.userbot import sources as source_service
 from app.userbot.client import create_telethon_client
 from app.userbot.handlers import register_handlers
 from app.services.monitor import process_message
+from app.services.web_monitor.delivery import (
+    configure as configure_web_delivery,
+    recover_pending_web_deliveries,
+    web_delivery_worker,
+)
+from app.services.web_monitor.scheduler import close_web_monitor, run_web_monitor
+from app.services.web_monitor.webhooks import start_webhook_server, stop_webhook_server
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -72,17 +79,31 @@ async def main() -> None:
         admin_id=settings.admin_id,
         client=client,
     )
+    configure_web_delivery(bot=bot, admin_id=settings.admin_id)
 
     register_handlers(client, process_message)
 
     worker_task = asyncio.create_task(notification_worker())
     recovery_task = asyncio.create_task(periodic_recovery())
+    web_monitor_task = asyncio.create_task(run_web_monitor(), name="web-monitor")
+    web_delivery_task = asyncio.create_task(web_delivery_worker(), name="web-delivery-worker")
+    web_recovery_task = asyncio.create_task(
+        recover_pending_web_deliveries(),
+        name="web-delivery-recovery",
+    )
     telethon_task = asyncio.create_task(_run_telethon(client))
     polling_task = asyncio.create_task(dispatcher.start_polling(bot))
 
     try:
+        await start_webhook_server()
         done, pending = await asyncio.wait(
-            {worker_task, telethon_task, polling_task},
+            {
+                worker_task,
+                web_monitor_task,
+                web_delivery_task,
+                telethon_task,
+                polling_task,
+            },
             return_when=asyncio.FIRST_EXCEPTION,
         )
         for task in done:
@@ -96,13 +117,31 @@ async def main() -> None:
         raise
     finally:
         _stopping = True
-        for task in (worker_task, recovery_task, telethon_task, polling_task):
+        for task in (
+            worker_task,
+            recovery_task,
+            web_monitor_task,
+            web_delivery_task,
+            web_recovery_task,
+            telethon_task,
+            polling_task,
+        ):
             task.cancel()
-        for task in (worker_task, recovery_task, telethon_task, polling_task):
+        for task in (
+            worker_task,
+            recovery_task,
+            web_monitor_task,
+            web_delivery_task,
+            web_recovery_task,
+            telethon_task,
+            polling_task,
+        ):
             try:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+        await stop_webhook_server()
+        await close_web_monitor()
         try:
             await client.disconnect()
         except Exception:

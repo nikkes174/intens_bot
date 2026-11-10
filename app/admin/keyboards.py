@@ -9,8 +9,65 @@ def main_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="🔑 Упоминания", callback_data="mentions:list")],
             [InlineKeyboardButton(text="📡 Каналы и группы", callback_data="sources:list")],
+            [InlineKeyboardButton(text="🌐 Мониторинг интернета", callback_data="web:list")],
             [InlineKeyboardButton(text="📊 Статистика", callback_data="stats:show")],
             [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings:show")],
+        ]
+    )
+
+
+def web_main_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Добавить имя", callback_data="web:add")],
+            [InlineKeyboardButton(text="📋 Список отслеживания", callback_data="web:watches")],
+            [InlineKeyboardButton(text="📰 Найденные публикации", callback_data="web:articles")],
+            [InlineKeyboardButton(text="📡 Источники", callback_data="web:sources")],
+            [InlineKeyboardButton(text="⚙️ Настройки", callback_data="web:settings")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:main")],
+        ]
+    )
+
+
+def web_watches_keyboard(items) -> InlineKeyboardMarkup:
+    rows = []
+    for item in items:
+        status = "🟢" if item.enabled else "🔴"
+        rows.append(
+            [InlineKeyboardButton(text=f"{status} {item.query}", callback_data=f"web:watch:{item.id}")]
+        )
+    rows.extend(
+        [
+            [InlineKeyboardButton(text="➕ Добавить имя", callback_data="web:add")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="web:list")],
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def web_watch_actions_keyboard(watch_id: int, enabled: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Изменить", callback_data=f"web:edit:{watch_id}")],
+            [
+                InlineKeyboardButton(
+                    text="⏸ Отключить" if enabled else "▶️ Включить",
+                    callback_data=f"web:toggle:{watch_id}",
+                )
+            ],
+            [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"web:delete:{watch_id}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="web:watches")],
+        ]
+    )
+
+
+def web_confirm_delete_keyboard(watch_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"web:delete_confirm:{watch_id}"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"web:watch:{watch_id}"),
+            ]
         ]
     )
 

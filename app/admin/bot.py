@@ -21,12 +21,14 @@ def create_dispatcher() -> Dispatcher:
     from app.admin.mentions import router as mentions_router
     from app.admin.channels import router as channels_router
     from app.admin.settings import router as settings_router
+    from app.admin.web_monitor import router as web_monitor_router
 
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     dp.include_router(mentions_router)
     dp.include_router(channels_router)
     dp.include_router(settings_router)
+    dp.include_router(web_monitor_router)
     return dp
 
 
