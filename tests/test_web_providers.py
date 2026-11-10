@@ -8,6 +8,7 @@ from app.services.web_monitor.providers import (
     GoogleNewsRSSProvider,
     ProviderHTTPError,
     RSSProvider,
+    RSSProviderError,
 )
 
 
@@ -51,3 +52,37 @@ async def test_direct_rss_provider():
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         articles = await RSSProvider(client, [("Test", "https://x.test/feed")]).fetch("")
     assert articles[0].source_name == "Test"
+
+
+@pytest.mark.asyncio
+async def test_rss_continues_after_one_broken_feed(caplog):
+    good_body = (
+        "<rss><channel><item><title>Иван Иванов</title>"
+        "<link>https://x.test/1</link></item></channel></rss>"
+    ).encode()
+
+    async def handler(request):
+        if request.url.host == "broken.test":
+            return httpx.Response(503, request=request)
+        return httpx.Response(200, content=good_body, request=request)
+
+    feeds = [
+        ("Broken", "https://broken.test/feed"),
+        ("Good 1", "https://good-one.test/feed"),
+        ("Good 2", "https://good-two.test/feed"),
+    ]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        articles = await RSSProvider(client, feeds).fetch("")
+    assert len(articles) == 2
+    assert "https://broken.test/feed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_rss_reports_total_failure():
+    async def handler(request):
+        return httpx.Response(500, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(RSSProviderError) as error:
+            await RSSProvider(client, ["https://broken.test/feed"]).fetch("")
+    assert error.value.failed_urls == ("https://broken.test/feed",)

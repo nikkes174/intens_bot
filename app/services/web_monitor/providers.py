@@ -33,6 +33,12 @@ class ProviderHTTPError(RuntimeError):
         super().__init__(message or f"{provider} returned HTTP {status_code}")
 
 
+class RSSProviderError(ProviderHTTPError):
+    def __init__(self, message: str, failed_urls: Iterable[str]):
+        super().__init__("rss", 0, message)
+        self.failed_urls = tuple(failed_urls)
+
+
 class WebProvider(Protocol):
     name: str
     min_interval: float
@@ -201,27 +207,44 @@ class RSSProvider:
 
     async def fetch(self, query: str = "") -> list[WebArticle]:
         articles: list[WebArticle] = []
+        failed_urls: list[str] = []
         for source_name, url in self.feeds:
-            response = await _request(self.client, self.name, url)
-            parsed = feedparser.parse(response.content)
-            for entry in parsed.entries:
-                link = str(entry.get("link") or "").strip()
-                if not link:
-                    continue
-                entry_source = entry.get("source") or {}
-                resolved_source = (
-                    entry_source.get("title") if hasattr(entry_source, "get") else None
-                ) or source_name
-                articles.append(
-                    WebArticle(
-                        provider=self.name,
-                        title=str(entry.get("title") or "").strip(),
-                        url=link,
-                        source_name=str(resolved_source),
-                        published_at=_as_datetime(entry.get("published_parsed") or entry.get("published")),
-                        description=str(entry.get("summary") or entry.get("description") or "").strip(),
+            try:
+                response = await _request(self.client, self.name, url)
+                parsed = feedparser.parse(response.content)
+                if getattr(parsed, "bozo", False) and not parsed.entries:
+                    raise ValueError("invalid RSS/Atom XML")
+                for entry in parsed.entries:
+                    link = str(entry.get("link") or "").strip()
+                    if not link:
+                        continue
+                    entry_source = entry.get("source") or {}
+                    resolved_source = (
+                        entry_source.get("title") if hasattr(entry_source, "get") else None
+                    ) or source_name
+                    articles.append(
+                        WebArticle(
+                            provider=self.name,
+                            title=str(entry.get("title") or "").strip(),
+                            url=link,
+                            source_name=str(resolved_source),
+                            published_at=_as_datetime(
+                                entry.get("published_parsed") or entry.get("published")
+                            ),
+                            description=str(
+                                entry.get("summary") or entry.get("description") or ""
+                            ).strip(),
+                        )
                     )
-                )
+            except Exception as exc:  # noqa: BLE001 - one broken feed must not stop the batch
+                failed_urls.append(url)
+                logger.warning("RSS feed %s failed: %s", url, exc)
+                continue
+        if self.feeds and failed_urls and len(failed_urls) == len(self.feeds):
+            raise RSSProviderError(
+                f"All RSS feeds failed ({len(failed_urls)}/{len(self.feeds)})",
+                failed_urls,
+            )
         return articles
 
 

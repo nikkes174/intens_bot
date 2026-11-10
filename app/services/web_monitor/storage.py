@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import func, select
@@ -29,6 +30,7 @@ TRACKING_KEYS = {
     "mc_eid",
     "_ga",
 }
+TITLE_DEDUP_WINDOW = timedelta(hours=6)
 
 
 def normalize_url(url: str) -> str:
@@ -71,6 +73,16 @@ def _utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+def _normalize_article_field(value: str | None) -> str:
+    return normalize_text(value).strip(" -–—|·")
+
+
+def _normalize_source(value: str | None) -> str:
+    source = _normalize_article_field(value)
+    source = re.sub(r"^https?://", "", source)
+    return source.removeprefix("www.").rstrip("/")
 
 
 @dataclass(frozen=True)
@@ -137,6 +149,27 @@ async def upsert_article(article: WebArticle) -> tuple[WebArticleRecord, bool]:
     async with session_scope() as db:
         result = await db.execute(select(WebArticleRecord).where(WebArticleRecord.url_hash == digest))
         record = result.scalar_one_or_none()
+        if record is None and article.published_at is not None:
+            published_at = _utc(article.published_at)
+            lower_bound = published_at - TITLE_DEDUP_WINDOW
+            upper_bound = published_at + TITLE_DEDUP_WINDOW
+            candidates_result = await db.execute(
+                select(WebArticleRecord).where(
+                    WebArticleRecord.published_at >= lower_bound,
+                    WebArticleRecord.published_at <= upper_bound,
+                )
+            )
+            normalized_title = _normalize_article_field(article.title)
+            normalized_source = _normalize_source(article.source_name)
+            for candidate in candidates_result.scalars().all():
+                if (
+                    normalized_title
+                    and normalized_title == _normalize_article_field(candidate.title)
+                    and normalized_source
+                    and normalized_source == _normalize_source(candidate.source_name)
+                ):
+                    record = candidate
+                    break
         created = record is None
         if record is None:
             record = WebArticleRecord(
@@ -197,6 +230,13 @@ async def ingest_article(
     detection_ids: list[int] = []
     delivery_ids: list[int] = []
     admin_id = get_settings().admin_id if admin_id is None else admin_id
+    first_seen_at = _utc(record.first_seen_at) or datetime.now(UTC)
+    observation_window = timedelta(
+        seconds=max(60, get_settings().web_monitor_interval * 2)
+    )
+    is_recent_article = created_article or (
+        datetime.now(UTC) - observation_window <= first_seen_at <= datetime.now(UTC)
+    )
 
     async with session_scope() as db:
         for watch, match in matched_watches:
@@ -207,7 +247,8 @@ async def ingest_article(
                 )
             )
             detection = result.scalar_one_or_none()
-            if detection is None:
+            is_new_detection = detection is None
+            if is_new_detection:
                 detection = WebDetection(
                     article_id=record.id,
                     watch_id=watch.id,
@@ -216,7 +257,10 @@ async def ingest_article(
                 db.add(detection)
                 await db.flush()
             detection_ids.append(detection.id)
-            if watch.id in notify_ids and admin_id:
+            # A delivery belongs to the first detection, not to every later
+            # observation of the same detection.  This also prevents a
+            # restart or enabling notifications from replaying old articles.
+            if is_new_detection and is_recent_article and watch.id in notify_ids and admin_id:
                 delivery_result = await db.execute(
                     select(WebDelivery).where(
                         WebDelivery.detection_id == detection.id,

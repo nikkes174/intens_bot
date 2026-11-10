@@ -29,65 +29,89 @@ def _phrase_pattern(phrase: str) -> re.Pattern[str]:
     return re.compile(rf"(?<!{_WORD_CHARS}){escaped}(?!{_WORD_CHARS})", re.IGNORECASE)
 
 
-def _replace_suffix(word: str, suffixes: tuple[str, ...], replacement: str) -> str | None:
-    for suffix in suffixes:
-        if word.endswith(suffix) and len(word) > len(suffix):
-            return word[: -len(suffix)] + replacement
-    return None
+_CASES = ("nom", "gen", "dat", "acc", "ins", "prep")
+
+
+def _first_name_case_forms(word: str) -> dict[str, str]:
+    """Return aligned case forms for a common Russian given name."""
+
+    word = normalize_text(word)
+    irregular = {
+        "пётр": ("пётр", "петра", "петру", "петра", "петром", "петре"),
+        "петр": ("петр", "петра", "петру", "петра", "петром", "петре"),
+        "лев": ("лев", "льва", "льву", "льва", "львом", "льве"),
+        "павел": ("павел", "павла", "павлу", "павла", "павлом", "павле"),
+        "любовь": ("любовь", "любви", "любви", "любовь", "любовью", "любви"),
+    }
+    if word in irregular:
+        return dict(zip(_CASES, irregular[word], strict=True))
+
+    if word.endswith(("й", "ь")):
+        stem = word[:-1]
+        values = (word, stem + "я", stem + "ю", stem + "я", stem + "ем", stem + "е")
+    elif word.endswith("я"):
+        stem = word[:-1]
+        values = (word, stem + "и", stem + "е", stem + "ю", stem + "ей", stem + "е")
+    elif word.endswith("а"):
+        stem = word[:-1]
+        genitive_ending = "и" if word.endswith(("га", "ка", "ха")) else "ы"
+        values = (
+            word,
+            stem + genitive_ending,
+            stem + "е",
+            stem + "у",
+            stem + "ой",
+            stem + "е",
+        )
+    else:
+        values = (word, word + "а", word + "у", word + "а", word + "ом", word + "е")
+    return dict(zip(_CASES, values, strict=True))
+
+
+def _surname_case_forms(word: str) -> dict[str, str]:
+    """Return aligned masculine/feminine surname forms."""
+
+    word = normalize_text(word)
+    if word.endswith(("ова", "ева", "ёва", "ина", "ына")):
+        stem = word[:-1]
+        values = (word, stem + "ой", stem + "ой", stem + "у", stem + "ой", stem + "ой")
+    elif word.endswith(("ов", "ев", "ёв", "ин", "ын")):
+        values = (word, word + "а", word + "у", word + "а", word + "ым", word + "е")
+    elif word.endswith(("ская", "цкая")):
+        stem = word[:-4]
+        values = (word, stem + "ской", stem + "ской", stem + "скую", stem + "ской", stem + "ской")
+    elif word.endswith(("ский", "цкий")):
+        stem = word[:-2]
+        values = (word, stem + "ого", stem + "ому", stem + "ого", stem + "им", stem + "ом")
+    elif word.endswith("ая"):
+        stem = word[:-2]
+        values = (word, stem + "ой", stem + "ой", stem + "ую", stem + "ой", stem + "ой")
+    elif word.endswith(("ый", "ий", "ой")):
+        stem = word[:-2]
+        instrumental = "им" if word.endswith("ий") else "ым"
+        prepositional = "ем" if word.endswith("ий") else "ом"
+        values = (
+            word,
+            stem + "ого",
+            stem + "ому",
+            stem + "ого",
+            stem + instrumental,
+            stem + prepositional,
+        )
+    elif word.endswith("ец"):
+        stem = word[:-2]
+        values = (word, stem + "ца", stem + "цу", stem + "ца", stem + "цем", stem + "це")
+    else:
+        return {"nom": word}
+    return dict(zip(_CASES, values, strict=True))
 
 
 def _first_name_forms(word: str) -> list[str]:
-    forms = {word}
-    lower = word.casefold()
-
-    # Common masculine Russian names (Иван, Пётр, Сергей, Дмитрий, ...).
-    if lower.endswith(("й", "ь")):
-        forms.update(
-            {
-                word[:-1] + "я",
-                word[:-1] + "ю",
-                word[:-1] + "ем",
-                word[:-1] + "е",
-            }
-        )
-    elif lower.endswith("а"):
-        forms.update({word[:-1] + "ы", word[:-1] + "е", word[:-1] + "у", word[:-1] + "ой"})
-        if lower.endswith(("га", "ка", "ха")):
-            forms.add(word[:-1] + "и")
-    elif lower.endswith("я"):
-        forms.update({word[:-1] + "и", word[:-1] + "е", word[:-1] + "ю", word[:-1] + "ей"})
-    elif lower.endswith(("н", "р", "л", "м", "в", "д", "т", "с", "з", "б", "п", "к", "г", "ф", "х", "ч", "ш")):
-        forms.update({word + "а", word + "у", word + "ом", word + "е"})
-
-    # A few frequent names do not follow the productive endings above.
-    irregular = {
-        "петр": ("петра", "петру", "петром", "петре"),
-        "лев": ("льва", "льву", "львом", "льве"),
-        "любовь": ("любови", "любови", "любовью", "любови"),
-    }
-    forms.update(irregular.get(lower, ()))
-    return list(forms)
+    return list(_first_name_case_forms(word).values())
 
 
 def _surname_forms(word: str) -> list[str]:
-    forms = {word}
-    lower = word.casefold()
-
-    if lower.endswith(("ова", "ева", "ёва", "ина", "ына")):
-        forms.update({word[:-1] + "ой", word[:-1] + "у", word[:-1] + "ою"})
-    elif lower.endswith(("ов", "ев", "ёв", "ин", "ын")):
-        forms.update({word + "а", word + "у", word + "ым", word + "е"})
-    elif lower.endswith(("ский", "цкий", "ской", "цкой")):
-        if lower.endswith(("ский", "цкий")):
-            forms.update({word[:-2] + "ого", word[:-2] + "ому", word[:-2] + "им", word[:-2] + "ом"})
-        else:
-            forms.update({word[:-2] + "ого", word[:-2] + "ому", word[:-2] + "им", word[:-2] + "ом"})
-    elif lower.endswith(("ый", "ий", "ой")):
-        forms.update({word[:-2] + "ого", word[:-2] + "ому", word[:-2] + "ым", word[:-2] + "ом"})
-    elif lower.endswith("ец"):
-        forms.update({word[:-2] + "ца", word[:-2] + "цу", word[:-2] + "цем", word[:-2] + "це"})
-
-    return list(forms)
+    return list(_surname_case_forms(word).values())
 
 
 def generate_name_variants(query: str) -> list[str]:
@@ -103,15 +127,13 @@ def generate_name_variants(query: str) -> list[str]:
         return [normalized_query] if normalized_query else []
 
     first, surname = words
-    first_forms = _first_name_forms(first)
-    surname_forms = _surname_forms(surname)
-    variants = {f"{first} {surname}"}
-
-    # Aligned case forms are preferred; the full cartesian product is also
-    # useful for mixed editorial forms (e.g. first name left unchanged).
-    for first_form, surname_form in zip(first_forms[1:], surname_forms[1:]):
-        variants.add(f"{first_form} {surname_form}")
-    variants.update(f"{first_form} {surname_form}" for first_form in first_forms for surname_form in surname_forms)
+    first_forms = _first_name_case_forms(first)
+    surname_forms = _surname_case_forms(surname)
+    variants = {
+        f"{first_forms[case]} {surname_forms[case]}"
+        for case in _CASES
+        if case in first_forms and case in surname_forms
+    }
     return sorted(variants, key=lambda item: (len(item), item))
 
 
