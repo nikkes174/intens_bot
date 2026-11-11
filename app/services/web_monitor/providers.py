@@ -1,16 +1,29 @@
 from __future__ import annotations
 
+import asyncio
 import calendar
 import email.utils
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any, Protocol
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 
 import feedparser
 import httpx
+
+from app.config import get_settings
+from app.services.web_monitor.media_registry import (
+    get_enabled_sitemap_endpoints,
+    save_endpoint_check,
+)
+from app.services.web_monitor.rss_discovery import fetch_public_document
+from app.services.web_monitor.source_discovery import (
+    extract_news_page_links,
+    parse_sitemap_xml,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +207,7 @@ class RSSProvider:
         client: httpx.AsyncClient,
         feeds: Iterable[str | tuple[str, str]],
         min_interval: float = 60.0,
+        max_concurrency: int | None = None,
     ):
         self.client = client
         self.min_interval = max(30.0, min_interval)
@@ -207,6 +221,12 @@ class RSSProvider:
                 self.feeds.append((str(source_name).strip() or "RSS", str(url).strip()))
         self._enabled_urls: set[str] | None = None
         self.feed_status: dict[str, dict[str, str]] = {}
+        self.max_concurrency = max(
+            1,
+            max_concurrency or get_settings().web_source_poll_concurrency,
+        )
+        self._domain_locks: dict[str, asyncio.Lock] = {}
+        self._domain_last_request: dict[str, float] = {}
 
     @staticmethod
     def _feed_key(url: str) -> str:
@@ -214,6 +234,21 @@ class RSSProvider:
 
     def set_enabled_urls(self, urls: Iterable[str] | None) -> None:
         self._enabled_urls = None if urls is None else {self._feed_key(url) for url in urls}
+
+    def set_feeds(self, feeds: Iterable[str | tuple[str, str]]) -> None:
+        known: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for feed in feeds:
+            if isinstance(feed, tuple):
+                source_name, url = feed
+            else:
+                source_name, url = "RSS", feed
+            normalized_url = str(url).strip()
+            key = self._feed_key(normalized_url)
+            if normalized_url and key not in seen:
+                seen.add(key)
+                known.append((str(source_name).strip() or "RSS", normalized_url))
+        self.feeds = known
 
     def _active_feeds(self) -> list[tuple[str, str]]:
         if self._enabled_urls is None:
@@ -224,49 +259,248 @@ class RSSProvider:
             if self._feed_key(url) in self._enabled_urls
         ]
 
+    async def _respect_domain_rate(self, url: str) -> None:
+        domain = (urlsplit(url).hostname or "").casefold()
+        lock = self._domain_locks.setdefault(domain, asyncio.Lock())
+        async with lock:
+            now = monotonic()
+            previous = self._domain_last_request.get(domain)
+            if previous is not None:
+                await asyncio.sleep(max(0.0, 0.2 - (now - previous)))
+            self._domain_last_request[domain] = monotonic()
+
+    async def _fetch_feed(self, source_name: str, url: str) -> list[WebArticle]:
+        await self._respect_domain_rate(url)
+        response = await _request(self.client, self.name, url)
+        parsed = feedparser.parse(response.content)
+        if getattr(parsed, "bozo", False) and not parsed.entries:
+            raise ValueError("invalid RSS/Atom XML")
+        articles: list[WebArticle] = []
+        for entry in parsed.entries:
+            link = str(entry.get("link") or "").strip()
+            if not link:
+                continue
+            entry_source = entry.get("source") or {}
+            resolved_source = (
+                entry_source.get("title") if hasattr(entry_source, "get") else None
+            ) or source_name
+            articles.append(
+                WebArticle(
+                    provider=self.name,
+                    title=str(entry.get("title") or "").strip(),
+                    url=link,
+                    source_name=str(resolved_source),
+                    published_at=_as_datetime(
+                        entry.get("published_parsed") or entry.get("published")
+                    ),
+                    description=str(
+                        entry.get("summary") or entry.get("description") or ""
+                    ).strip(),
+                )
+            )
+        return articles
+
     async def fetch(self, query: str = "") -> list[WebArticle]:
         articles: list[WebArticle] = []
         failed_urls: list[str] = []
         active_feeds = self._active_feeds()
-        for source_name, url in active_feeds:
-            try:
-                response = await _request(self.client, self.name, url)
-                parsed = feedparser.parse(response.content)
-                if getattr(parsed, "bozo", False) and not parsed.entries:
-                    raise ValueError("invalid RSS/Atom XML")
-                for entry in parsed.entries:
-                    link = str(entry.get("link") or "").strip()
-                    if not link:
-                        continue
-                    entry_source = entry.get("source") or {}
-                    resolved_source = (
-                        entry_source.get("title") if hasattr(entry_source, "get") else None
-                    ) or source_name
-                    articles.append(
-                        WebArticle(
-                            provider=self.name,
-                            title=str(entry.get("title") or "").strip(),
-                            url=link,
-                            source_name=str(resolved_source),
-                            published_at=_as_datetime(
-                                entry.get("published_parsed") or entry.get("published")
-                            ),
-                            description=str(
-                                entry.get("summary") or entry.get("description") or ""
-                            ).strip(),
-                        )
-                    )
-                self.feed_status[url] = {"status": "ok", "error": ""}
-            except Exception as exc:  # noqa: BLE001 - one broken feed must not stop the batch
-                failed_urls.append(url)
-                self.feed_status[url] = {"status": "error", "error": str(exc)}
-                logger.warning("RSS feed %s failed: %s", url, exc)
-                continue
+        if not active_feeds:
+            return articles
+        queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(
+            maxsize=max(1, self.max_concurrency * 2)
+        )
+        workers = []
+
+        async def worker() -> None:
+            while True:
+                source_name, url = await queue.get()
+                try:
+                    feed_articles = await self._fetch_feed(source_name, url)
+                    articles.extend(feed_articles)
+                    self.feed_status[url] = {"status": "ok", "error": ""}
+                except Exception as exc:  # noqa: BLE001 - one feed must not stop the batch
+                    failed_urls.append(url)
+                    self.feed_status[url] = {"status": "error", "error": str(exc)}
+                    logger.warning("RSS feed %s failed: %s", url, exc)
+                finally:
+                    queue.task_done()
+
+        for _ in range(min(self.max_concurrency, len(active_feeds))):
+            workers.append(asyncio.create_task(worker()))
+        for feed in active_feeds:
+            await queue.put(feed)
+        await queue.join()
+        for task in workers:
+            task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
         if active_feeds and failed_urls and len(failed_urls) == len(active_feeds):
             raise RSSProviderError(
                 f"All RSS feeds failed ({len(failed_urls)}/{len(active_feeds)})",
                 failed_urls,
             )
+        return articles
+
+
+class SitemapProvider:
+    """Poll verified news sitemaps with bounded concurrency and validators."""
+
+    name = "sitemap"
+    min_interval = 300.0
+
+    def __init__(self, client: httpx.AsyncClient, max_concurrency: int | None = None):
+        self.client = client
+        self.max_concurrency = max(
+            1,
+            max_concurrency or get_settings().web_source_poll_concurrency,
+        )
+        self.endpoint_status: dict[str, dict[str, str]] = {}
+
+    async def _fetch_endpoint(self, endpoint) -> list[WebArticle]:
+        headers = {}
+        if endpoint.etag:
+            headers["If-None-Match"] = endpoint.etag
+        if endpoint.last_modified:
+            headers["If-Modified-Since"] = endpoint.last_modified
+        document = await fetch_public_document(
+            self.client,
+            endpoint.url,
+            conditional_headers=headers,
+        )
+        if document.status_code == 304 or (
+            endpoint.content_hash and endpoint.content_hash == document.content_hash
+        ):
+            await save_endpoint_check(
+                endpoint.id,
+                status="ok",
+                http_status=document.status_code,
+                etag=document.headers.get("etag"),
+                last_modified=document.headers.get("last-modified"),
+                content_hash=document.content_hash or endpoint.content_hash,
+            )
+            return []
+        parsed = parse_sitemap_xml(document.content)
+        if parsed.kind == "index":
+            await save_endpoint_check(
+                endpoint.id,
+                status="ok",
+                http_status=document.status_code,
+                etag=document.headers.get("etag"),
+                last_modified=document.headers.get("last-modified"),
+                content_hash=document.content_hash,
+            )
+            return []
+        domain = urlsplit(endpoint.url).hostname or "sitemap"
+        articles = [
+            WebArticle(
+                provider=self.name,
+                title=entry.title or entry.url,
+                url=entry.url,
+                source_name=domain,
+                published_at=entry.published_at or entry.lastmod,
+            )
+            for entry in parsed.entries
+        ]
+        await save_endpoint_check(
+            endpoint.id,
+            status="ok",
+            http_status=document.status_code,
+            etag=document.headers.get("etag"),
+            last_modified=document.headers.get("last-modified"),
+            content_hash=document.content_hash,
+        )
+        return articles
+
+
+    async def fetch(self, query: str = "") -> list[WebArticle]:
+        if not get_settings().web_sitemap_enabled:
+            return []
+        endpoints = await get_enabled_sitemap_endpoints()
+        if not endpoints:
+            return []
+        queue: asyncio.Queue = asyncio.Queue(maxsize=max(1, self.max_concurrency * 2))
+        articles: list[WebArticle] = []
+        failures: list[str] = []
+
+        async def worker() -> None:
+            while True:
+                endpoint = await queue.get()
+                try:
+                    articles.extend(await self._fetch_endpoint(endpoint))
+                    self.endpoint_status[endpoint.url] = {"status": "ok", "error": ""}
+                except Exception as exc:  # noqa: BLE001 - isolate one sitemap
+                    failures.append(endpoint.url)
+                    self.endpoint_status[endpoint.url] = {"status": "error", "error": str(exc)}
+                    logger.warning("Sitemap %s failed: %s", endpoint.url, exc)
+                    await save_endpoint_check(endpoint.id, status="error", error=str(exc))
+                finally:
+                    queue.task_done()
+
+        workers = [
+            asyncio.create_task(worker())
+            for _ in range(min(self.max_concurrency, len(endpoints)))
+        ]
+        for endpoint in endpoints:
+            await queue.put(endpoint)
+        await queue.join()
+        for task in workers:
+            task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        if failures and len(failures) == len(endpoints):
+            raise ProviderHTTPError(self.name, 0, "All sitemaps failed")
+        return articles
+
+
+class PublicNewsPageProvider:
+    """Optional, shallow polling of explicitly approved news pages."""
+
+    name = "news_page"
+    min_interval = 900.0
+
+    def __init__(self, client: httpx.AsyncClient):
+        self.client = client
+        self.max_concurrency = max(1, get_settings().web_source_poll_concurrency)
+
+    async def fetch(self, query: str = "") -> list[WebArticle]:
+        if not get_settings().web_public_news_pages_enabled:
+            return []
+        from app.services.web_monitor.media_registry import get_enabled_endpoints
+
+        # The registry helper is intentionally narrow; query news pages here
+        # so the feature remains off unless an administrator explicitly enables it.
+        endpoints = await get_enabled_endpoints("news_page")
+        articles: list[WebArticle] = []
+        queue: asyncio.Queue = asyncio.Queue(maxsize=max(1, self.max_concurrency * 2))
+
+        async def worker() -> None:
+            while True:
+                endpoint = await queue.get()
+                try:
+                    document = await fetch_public_document(self.client, endpoint.url)
+                    for link in extract_news_page_links(document):
+                        articles.append(
+                            WebArticle(
+                                provider=self.name,
+                                title=link.rsplit("/", 1)[-1].replace("-", " "),
+                                url=link,
+                                source_name=urlsplit(endpoint.url).hostname or "news page",
+                                published_at=None,
+                            )
+                        )
+                except Exception as exc:  # noqa: BLE001 - isolate one approved page
+                    logger.warning("News page %s failed: %s", endpoint.url, exc)
+                finally:
+                    queue.task_done()
+
+        workers = [
+            asyncio.create_task(worker())
+            for _ in range(min(self.max_concurrency, len(endpoints)))
+        ]
+        for endpoint in endpoints:
+            await queue.put(endpoint)
+        await queue.join()
+        for task in workers:
+            task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
         return articles
 
 

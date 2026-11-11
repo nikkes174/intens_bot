@@ -95,3 +95,34 @@ async def test_private_url_and_unsafe_redirect_are_rejected(monkeypatch):
     monkeypatch.setattr(article_extractor, "_fetch_robots", AsyncMock(return_value=True))
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         assert await extract_article(client, "https://example.com/redirect") is None
+
+
+@pytest.mark.asyncio
+async def test_pinned_backend_rejects_rebinding_to_non_public_address(monkeypatch):
+    backend = article_extractor._PinnedPublicIPBackend()
+    connect_tcp = AsyncMock()
+    backend._backend.connect_tcp = connect_tcp
+    monkeypatch.setattr(
+        article_extractor,
+        "_resolve_public_ip",
+        AsyncMock(return_value=None),
+    )
+    with pytest.raises(OSError):
+        await backend.connect_tcp("public.example", 443)
+    connect_tcp.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pinned_backend_connects_to_the_validated_ip(monkeypatch):
+    backend = article_extractor._PinnedPublicIPBackend()
+    connect_tcp = AsyncMock(return_value="stream")
+    backend._backend.connect_tcp = connect_tcp
+    monkeypatch.setattr(
+        article_extractor,
+        "_resolve_public_ip",
+        AsyncMock(return_value="203.0.113.10"),
+    )
+    result = await backend.connect_tcp("public.example", 443)
+    assert result == "stream"
+    connect_tcp.assert_awaited_once()
+    assert connect_tcp.await_args.args[:2] == ("203.0.113.10", 443)

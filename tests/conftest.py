@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from app.database import close_database, init_database
 import app.models  # noqa: F401
+from app.database import close_database, init_database
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -31,15 +31,22 @@ def test_env():
 async def reset_db():
     await init_database()
     yield
-    from app.database import get_engine
+
     from sqlalchemy import text
+
+    from app.database import get_engine
 
     async with get_engine().begin() as conn:
         for table in (
             "web_deliveries",
             "web_detections",
+            "web_article_jobs",
             "web_article_records",
             "web_watches",
+            "web_media_source_checks",
+            "web_media_endpoints",
+            "web_media_candidates",
+            "web_media_sources",
             "deliveries",
             "detections",
             "exclusions",

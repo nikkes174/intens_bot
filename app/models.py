@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Index,
     String,
     Text,
     UniqueConstraint,
@@ -189,6 +190,186 @@ class WebArticleRecord(Base):
     extraction_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
+class WebArticleJob(Base):
+    """Durable queue entry for article enrichment and matching."""
+
+    __tablename__ = "web_article_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    article_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("web_article_records.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    notify_watch_ids: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    processed_watch_ids: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    next_retry_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    processing_started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class WebMediaSource(Base):
+    """Persistent registry entry for an internet information source."""
+
+    __tablename__ = "web_media_sources"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    domain: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    region: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    category: Mapped[str] = mapped_column(String(32), nullable=False, default="other")
+    discovery_methods: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    rss_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    last_checked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_success_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="catalog")
+    managed_by_user: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        Index("ix_web_media_sources_status", "status"),
+        Index("ix_web_media_sources_category_region", "category", "region"),
+        Index("ix_web_media_sources_polling", "enabled", "status", "last_checked_at"),
+    )
+
+
+class WebMediaEndpoint(Base):
+    """A feed, sitemap, or explicitly allowed news page for a source."""
+
+    __tablename__ = "web_media_endpoints"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("web_media_sources.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    discovered_by: Mapped[str] = mapped_column(String(64), nullable=False, default="manual")
+    last_checked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_success_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    etag: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    last_modified: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    content_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("source_id", "url", name="uq_web_media_endpoint_source_url"),
+        Index("ix_web_media_endpoints_polling", "enabled", "kind", "last_checked_at"),
+    )
+
+
+class WebMediaSourceCheck(Base):
+    """Append-only history for source and endpoint checks."""
+
+    __tablename__ = "web_media_source_checks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("web_media_sources.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    endpoint_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("web_media_endpoints.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    method: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    http_status: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    result: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        Index("ix_web_media_source_checks_source_time", "source_id", "checked_at"),
+        Index("ix_web_media_source_checks_status_time", "status", "checked_at"),
+    )
+
+
+class WebMediaCandidate(Base):
+    """A domain seen by a provider and waiting for bounded verification."""
+
+    __tablename__ = "web_media_candidates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    domain: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    region: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    category: Mapped[str] = mapped_column(String(32), nullable=False, default="other")
+    source_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    discovered_by: Mapped[str] = mapped_column(String(64), nullable=False, default="provider")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_checked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_check_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        Index("ix_web_media_candidates_queue", "status", "next_check_at"),
+    )
+
+
 class WebDetection(Base):
     __tablename__ = "web_detections"
 
@@ -250,3 +431,8 @@ class WebDelivery(Base):
             name="uq_web_delivery_detection_admin",
         ),
     )
+
+
+# Compatibility alias for registry integrations that use the domain model name
+# from the monitoring specification.
+MediaSource = WebMediaSource

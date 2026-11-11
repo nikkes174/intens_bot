@@ -8,11 +8,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    try:
+        value = int(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    return os.getenv(name, str(default)).lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass
 class Settings:
     bot_token: str = os.getenv("BOT_TOKEN", "")
-    admin_id: int = int(os.getenv("ADMIN_ID", "0") or 0)
-    api_id: int = int(os.getenv("API_ID", "0") or 0)
+    admin_id: int = _env_int("ADMIN_ID", 0)
+    api_id: int = _env_int("API_ID", 0)
     api_hash: str = os.getenv("API_HASH", "")
     database_url: str = os.getenv(
         "DATABASE_URL",
@@ -28,63 +40,50 @@ class Settings:
     }
     source_mode: str = os.getenv("SOURCE_MODE", "all")
     timezone: str = os.getenv("TIMEZONE", "Asia/Bangkok")
-    queue_size: int = int(os.getenv("QUEUE_SIZE", "100") or 100)
-    max_attempts: int = int(os.getenv("MAX_ATTEMPTS", "5") or 5)
+    queue_size: int = _env_int("QUEUE_SIZE", 100, 1)
+    max_attempts: int = _env_int("MAX_ATTEMPTS", 5, 1)
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
-    web_monitor_enabled: bool = os.getenv("WEB_MONITOR_ENABLED", "true").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    web_monitor_interval: int = max(
-        30,
-        int(os.getenv("WEB_MONITOR_INTERVAL", "30") or 30),
+    web_monitor_enabled: bool = _env_bool("WEB_MONITOR_ENABLED", True)
+    web_monitor_interval: int = _env_int("WEB_MONITOR_INTERVAL", 30, 30)
+    web_monitor_timeout: int = _env_int("WEB_MONITOR_TIMEOUT", 15, 1)
+    web_monitor_max_concurrency: int = _env_int("WEB_MONITOR_MAX_CONCURRENCY", 3, 1)
+    web_gdelt_min_interval: int = _env_int("WEB_GDELT_MIN_INTERVAL", 60, 30)
+    web_monitor_freshness_hours: int = _env_int("WEB_MONITOR_FRESHNESS_HOURS", 168, 1)
+    web_article_extraction_enabled: bool = _env_bool(
+        "WEB_ARTICLE_EXTRACTION_ENABLED", True
     )
-    web_monitor_timeout: int = int(os.getenv("WEB_MONITOR_TIMEOUT", "15") or 15)
-    web_monitor_max_concurrency: int = max(
-        1,
-        int(os.getenv("WEB_MONITOR_MAX_CONCURRENCY", "3") or 3),
-    )
-    web_gdelt_min_interval: int = max(
-        30,
-        int(os.getenv("WEB_GDELT_MIN_INTERVAL", "60") or 60),
-    )
-    web_monitor_freshness_hours: int = max(
-        1,
-        int(os.getenv("WEB_MONITOR_FRESHNESS_HOURS", "168") or 168),
-    )
-    web_article_extraction_enabled: bool = os.getenv(
-        "WEB_ARTICLE_EXTRACTION_ENABLED", "true"
-    ).lower() in {"1", "true", "yes", "on"}
-    web_article_max_concurrency: int = max(
-        1,
-        int(os.getenv("WEB_ARTICLE_MAX_CONCURRENCY", "3") or 3),
-    )
-    web_article_timeout: int = max(
-        1,
-        int(os.getenv("WEB_ARTICLE_TIMEOUT", "10") or 10),
-    )
-    web_russian_media_enabled: bool = os.getenv(
-        "WEB_RUSSIAN_MEDIA_ENABLED", "true"
-    ).lower() in {"1", "true", "yes", "on"}
-    web_russian_media_interval: int = max(
-        60,
-        int(os.getenv("WEB_RUSSIAN_MEDIA_INTERVAL", "300") or 300),
-    )
+    web_article_max_concurrency: int = _env_int("WEB_ARTICLE_MAX_CONCURRENCY", 3, 1)
+    web_article_timeout: int = _env_int("WEB_ARTICLE_TIMEOUT", 10, 1)
+    web_russian_media_enabled: bool = _env_bool("WEB_RUSSIAN_MEDIA_ENABLED", True)
+    web_russian_media_interval: int = _env_int("WEB_RUSSIAN_MEDIA_INTERVAL", 300, 60)
     web_rss_urls: str = os.getenv("WEB_RSS_URLS", "")
-    web_webhook_enabled: bool = os.getenv("WEB_WEBHOOK_ENABLED", "false").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    web_webhook_enabled: bool = _env_bool("WEB_WEBHOOK_ENABLED", False)
     web_webhook_host: str = os.getenv("WEB_WEBHOOK_HOST", "127.0.0.1")
-    web_webhook_port: int = int(os.getenv("WEB_WEBHOOK_PORT", "8080") or 8080)
+    web_webhook_port: int = _env_int("WEB_WEBHOOK_PORT", 8080, 1)
     web_webhook_secrets: str = os.getenv("WEB_WEBHOOK_SECRETS", "")
-    web_webhook_max_body: int = max(
-        1024,
-        int(os.getenv("WEB_WEBHOOK_MAX_BODY", "1048576") or 1048576),
+    web_webhook_max_body: int = _env_int("WEB_WEBHOOK_MAX_BODY", 1048576, 1024)
+    web_source_autodiscovery_enabled: bool = _env_bool(
+        "WEB_SOURCE_AUTODISCOVERY_ENABLED", True
+    )
+    web_rss_discovery_enabled: bool = _env_bool("WEB_RSS_DISCOVERY_ENABLED", True)
+    web_sitemap_enabled: bool = _env_bool("WEB_SITEMAP_ENABLED", True)
+    web_public_news_pages_enabled: bool = _env_bool(
+        "WEB_PUBLIC_NEWS_PAGES_ENABLED", False
+    )
+    web_source_check_concurrency: int = _env_int("WEB_SOURCE_CHECK_CONCURRENCY", 5, 1)
+    web_source_poll_concurrency: int = _env_int("WEB_SOURCE_POLL_CONCURRENCY", 10, 1)
+    web_source_discovery_daily_limit: int = _env_int(
+        "WEB_SOURCE_DISCOVERY_DAILY_LIMIT", 100, 1
+    )
+    web_source_request_timeout: int = _env_int("WEB_SOURCE_REQUEST_TIMEOUT", 10, 1)
+    web_source_max_candidates_per_run: int = _env_int(
+        "WEB_SOURCE_MAX_CANDIDATES_PER_RUN", 5, 1
+    )
+    web_source_max_sitemap_entries: int = _env_int(
+        "WEB_SOURCE_MAX_SITEMAP_ENTRIES", 10000, 1
+    )
+    web_source_max_sitemaps_per_domain: int = _env_int(
+        "WEB_SOURCE_MAX_SITEMAPS_PER_DOMAIN", 20, 1
     )
 
 

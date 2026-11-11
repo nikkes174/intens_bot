@@ -24,10 +24,96 @@ def web_main_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📰 Найденные публикации", callback_data="web:articles")],
             [InlineKeyboardButton(text="📰 Российские СМИ", callback_data="web:russian_sources")],
             [InlineKeyboardButton(text="📡 Источники", callback_data="web:sources")],
+            [InlineKeyboardButton(text="🌐 Источники интернета", callback_data="web:registry")],
             [InlineKeyboardButton(text="⚙️ Настройки", callback_data="web:settings")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:main")],
         ]
     )
+
+
+def web_registry_keyboard(page: int = 0, total_pages: int = 1, items=()) -> InlineKeyboardMarkup:
+    rows = []
+    for item in items:
+        status = {
+            "ok": "🟢",
+            "error": "🔴",
+            "unknown": "🟡",
+            "pending": "🟡",
+            "aggregator_only": "🔵",
+        }.get(item.status, "⚪")
+        if not item.enabled:
+            status = "⚪"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{status} {item.name or item.domain}"[:64],
+                    callback_data=f"web:registry:source:{item.id}",
+                )
+            ]
+        )
+    if total_pages > 1:
+        navigation = []
+        if page > 0:
+            navigation.append(
+                InlineKeyboardButton(text="◀️", callback_data=f"web:registry:page:{page - 1}")
+            )
+        navigation.append(
+            InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="web:registry")
+        )
+        if page < total_pages - 1:
+            navigation.append(
+                InlineKeyboardButton(text="▶️", callback_data=f"web:registry:page:{page + 1}")
+            )
+        rows.append(navigation)
+    rows.extend(
+        [
+            [InlineKeyboardButton(text="🔎 Найти источник", callback_data="web:registry:search")],
+            [InlineKeyboardButton(text="🌍 Регионы", callback_data="web:registry:regions")],
+            [InlineKeyboardButton(text="📂 Категории", callback_data="web:registry:categories")],
+            [InlineKeyboardButton(text="➕ Добавить сайт", callback_data="web:registry:add")],
+            [InlineKeyboardButton(text="🔄 Проверить источники", callback_data="web:registry:check")],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data="web:registry:stats")],
+            [InlineKeyboardButton(text="⚙️ Настройки", callback_data="web:settings")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="web:list")],
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def web_registry_source_keyboard(source_id: int, enabled: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⏸ Отключить" if enabled else "▶️ Включить",
+                    callback_data=f"web:registry:toggle:{source_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Проверить", callback_data=f"web:registry:source_check:{source_id}"
+                )
+            ],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="web:registry")],
+        ]
+    )
+
+
+def web_registry_values_keyboard(
+    kind: str,
+    values: list[tuple[str, str]],
+) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"web:registry:filter:{kind}:{value}",
+            )
+        ]
+        for value, label in values
+    ]
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="web:registry")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def web_russian_sources_keyboard(items) -> InlineKeyboardMarkup:

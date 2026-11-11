@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from app.config import get_settings
 from app.database import session_scope
 from app.models import (
     Setting,
+    WebArticleJob,
     WebArticleRecord,
     WebDelivery,
     WebDetection,
@@ -37,6 +39,8 @@ TITLE_DEDUP_WINDOW = timedelta(hours=6)
 WATCH_START_GRACE = timedelta(minutes=5)
 EXTRACTION_MAX_ATTEMPTS = 3
 EXTRACTION_RETRY_DELAYS = (60, 300)
+ARTICLE_JOB_MAX_ATTEMPTS = 5
+ARTICLE_JOB_STALE_AFTER = timedelta(minutes=5)
 
 
 def normalize_url(url: str) -> str:
@@ -212,6 +216,208 @@ async def upsert_article(article: WebArticle) -> tuple[WebArticleRecord, bool]:
         await db.refresh(record)
         db.expunge(record)
         return record, created
+
+
+async def get_article_record(article_id: int) -> WebArticleRecord | None:
+    async with session_scope() as db:
+        record = await db.get(WebArticleRecord, article_id)
+        if record is not None:
+            db.expunge(record)
+        return record
+
+
+def _decode_id_set(value: str | None) -> set[int]:
+    try:
+        decoded = json.loads(value or "[]")
+    except (TypeError, ValueError):
+        return set()
+    if not isinstance(decoded, list):
+        return set()
+    return {int(item) for item in decoded if str(item).isdigit()}
+
+
+def _encode_id_set(values: Iterable[int]) -> str:
+    return json.dumps(sorted({int(value) for value in values}), separators=(",", ":"))
+
+
+async def save_article_job(
+    article_id: int,
+    *,
+    notify_watch_ids: Iterable[int] = (),
+    watch_ids: Iterable[int] = (),
+) -> int:
+    """Persist or refresh the durable article-processing job."""
+
+    notify_ids = {int(value) for value in notify_watch_ids}
+    current_watch_ids = {int(value) for value in watch_ids}
+    async with session_scope() as db:
+        job = await db.scalar(
+            select(WebArticleJob).where(WebArticleJob.article_id == article_id)
+        )
+        if job is None:
+            job = WebArticleJob(
+                article_id=article_id,
+                notify_watch_ids=_encode_id_set(notify_ids),
+                status="pending",
+            )
+            db.add(job)
+        else:
+            stored_notify_ids = _decode_id_set(job.notify_watch_ids)
+            job.notify_watch_ids = _encode_id_set(stored_notify_ids | notify_ids)
+            processed_watch_ids = _decode_id_set(getattr(job, "processed_watch_ids", "[]"))
+            if (
+                job.status in {"done", "failed"}
+                and current_watch_ids - processed_watch_ids
+            ):
+                job.status = "pending"
+                job.attempts = 0
+                job.last_error = None
+                job.next_retry_at = None
+        await db.commit()
+        await db.refresh(job)
+        return job.id
+
+
+async def claim_article_job(
+    job_id: int,
+) -> tuple[WebArticleRecord, set[int]] | None:
+    """Atomically claim a durable job and return its article payload."""
+
+    now = datetime.now(UTC)
+    async with session_scope() as db:
+        job = await db.get(WebArticleJob, job_id)
+        if job is None:
+            return None
+        next_retry_at = _utc(job.next_retry_at)
+        if job.status in {"done", "failed"} or (
+            next_retry_at is not None and next_retry_at > now
+        ):
+            return None
+        processing_started_at = _utc(job.processing_started_at)
+        if (
+            job.status == "processing"
+            and processing_started_at is not None
+            and now - processing_started_at < ARTICLE_JOB_STALE_AFTER
+        ):
+            return None
+        if job.attempts >= ARTICLE_JOB_MAX_ATTEMPTS:
+            job.status = "failed"
+            await db.commit()
+            return None
+        record = await db.get(WebArticleRecord, job.article_id)
+        if record is None:
+            job.status = "failed"
+            job.last_error = "Статья задания не найдена"
+            await db.commit()
+            return None
+        job.status = "processing"
+        job.attempts += 1
+        job.processing_started_at = now
+        job.next_retry_at = None
+        job.last_error = None
+        await db.commit()
+        db.expunge(record)
+        return record, _decode_id_set(job.notify_watch_ids)
+
+
+async def get_pending_article_jobs(
+    limit: int,
+    exclude_job_ids: Iterable[int] = (),
+) -> list[tuple[int, WebArticleRecord, set[int]]]:
+    """Return durable jobs ready to enter the in-process bounded queue."""
+
+    if limit <= 0:
+        return []
+    now = datetime.now(UTC)
+    stale_before = now - ARTICLE_JOB_STALE_AFTER
+    excluded_ids = {int(value) for value in exclude_job_ids}
+    async with session_scope() as db:
+        stale_query = select(WebArticleJob).where(
+            WebArticleJob.status == "processing",
+            WebArticleJob.processing_started_at < stale_before,
+        )
+        if excluded_ids:
+            stale_query = stale_query.where(WebArticleJob.id.not_in(excluded_ids))
+        stale_result = await db.execute(stale_query)
+        for job in stale_result.scalars().all():
+            job.status = "pending"
+            job.processing_started_at = None
+            job.next_retry_at = now
+        await db.commit()
+        result = await db.execute(
+            select(WebArticleJob, WebArticleRecord)
+            .join(WebArticleRecord, WebArticleRecord.id == WebArticleJob.article_id)
+            .where(WebArticleJob.status.in_(["pending", "retry"]))
+            .where(
+                WebArticleJob.id.not_in(excluded_ids)
+                if excluded_ids
+                else WebArticleJob.id.is_not(None)
+            )
+            .where(
+                (WebArticleJob.next_retry_at.is_(None))
+                | (WebArticleJob.next_retry_at <= now)
+            )
+            .order_by(WebArticleJob.id)
+            .limit(limit)
+        )
+        jobs: list[tuple[int, WebArticleRecord, set[int]]] = []
+        for job, record in result.all():
+            db.expunge(record)
+            jobs.append((job.id, record, _decode_id_set(job.notify_watch_ids)))
+        return jobs
+
+
+async def complete_article_job(job_id: int, processed_watch_ids: Iterable[int]) -> None:
+    async with session_scope() as db:
+        job = await db.get(WebArticleJob, job_id)
+        if job is None:
+            return
+        processed = _decode_id_set(getattr(job, "processed_watch_ids", "[]"))
+        processed.update(int(value) for value in processed_watch_ids)
+        job.processed_watch_ids = _encode_id_set(processed)
+        job.status = "done"
+        job.processing_started_at = None
+        job.next_retry_at = None
+        job.last_error = None
+        await db.commit()
+
+
+async def retry_article_job(
+    job_id: int,
+    error: str,
+    next_retry_at: datetime | None = None,
+) -> None:
+    async with session_scope() as db:
+        job = await db.get(WebArticleJob, job_id)
+        if job is None:
+            return
+        job.status = "failed" if job.attempts >= ARTICLE_JOB_MAX_ATTEMPTS else "retry"
+        job.processing_started_at = None
+        job.next_retry_at = _utc(next_retry_at)
+        job.last_error = error[:2000]
+        await db.commit()
+
+
+async def release_article_job(job_id: int) -> None:
+    """Return an in-flight job to the durable queue during shutdown."""
+
+    async with session_scope() as db:
+        job = await db.get(WebArticleJob, job_id)
+        if job is not None and job.status == "processing":
+            job.status = "retry"
+            job.processing_started_at = None
+            job.next_retry_at = datetime.now(UTC)
+            await db.commit()
+
+
+async def release_article_extraction(article_id: int) -> None:
+    async with session_scope() as db:
+        record = await db.get(WebArticleRecord, article_id)
+        if record is not None and record.extraction_status == "processing":
+            record.extraction_status = "retry"
+            record.extraction_next_attempt_at = datetime.now(UTC)
+            record.extraction_error = "Обработка прервана при остановке мониторинга"
+            await db.commit()
 
 
 async def ingest_article(

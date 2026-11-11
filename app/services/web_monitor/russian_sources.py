@@ -18,6 +18,8 @@ class MediaSource:
     rss_url: str | None
     enabled: bool = True
     status_note: str = ""
+    region: str | None = None
+    category: str = "federal"
 
 
 # URLs are kept only where an official endpoint is known.  Sources without a
@@ -28,6 +30,7 @@ RUSSIAN_MEDIA = [
         "rbc.ru",
         None,
         status_note="Официальный RSS-адрес не отвечает; используется через агрегаторы.",
+        category="business",
     ),
     MediaSource("ТАСС", "tass.ru", "https://tass.ru/rss/v2.xml"),
     MediaSource("РИА Новости", "ria.ru", "https://ria.ru/export/rss2/archive/index.xml"),
@@ -36,9 +39,15 @@ RUSSIAN_MEDIA = [
         "interfax.ru",
         None,
         status_note="RSS не включён: правила Интерфакса ограничивают использование RSS.",
+        category="business",
     ),
-    MediaSource("Коммерсантъ", "kommersant.ru", "https://www.kommersant.ru/RSS/news.xml"),
-    MediaSource("Ведомости", "vedomosti.ru", "https://www.vedomosti.ru/rss/news"),
+    MediaSource(
+        "Коммерсантъ",
+        "kommersant.ru",
+        "https://www.kommersant.ru/RSS/news.xml",
+        category="business",
+    ),
+    MediaSource("Ведомости", "vedomosti.ru", "https://www.vedomosti.ru/rss/news", category="business"),
     MediaSource(
         "Известия",
         "iz.ru",
@@ -53,12 +62,15 @@ RUSSIAN_MEDIA = [
         "forbes.ru",
         None,
         status_note="Указанный RSS-адрес возвращает HTML вместо RSS/Atom XML.",
+        category="business",
     ),
     MediaSource(
         "Фонтанка",
         "fontanka.ru",
         None,
         status_note="Текущий официальный RSS-адрес не удалось достоверно подтвердить.",
+        region="Санкт-Петербург",
+        category="regional",
     ),
 ]
 
@@ -128,6 +140,13 @@ async def set_source_enabled(domain: str, enabled: bool) -> bool:
             row.value = value
             row.updated_at = datetime.now(UTC)
         await db.commit()
+    try:
+        from app.services.web_monitor.media_registry import set_source_enabled_by_domain
+
+        await set_source_enabled_by_domain(domain, enabled)
+    except (RuntimeError, ValueError):
+        # Keep the legacy setting usable during an older database upgrade.
+        pass
     return enabled
 
 

@@ -67,6 +67,9 @@ async def init_database():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_migrate_sqlite)
+    from app.services.web_monitor.media_registry import migrate_legacy_registry
+
+    await migrate_legacy_registry()
 
 
 def _migrate_sqlite(sync_conn):
@@ -108,6 +111,39 @@ def _migrate_sqlite(sync_conn):
             ),
             "extraction_error": (
                 "ALTER TABLE web_article_records ADD COLUMN extraction_error TEXT"
+            ),
+        }
+        for column, statement in additions.items():
+            if column not in columns:
+                sync_conn.execute(text(statement))
+    if "web_article_jobs" in tables:
+        columns = {col["name"] for col in inspector.get_columns("web_article_jobs")}
+        additions = {
+            "notify_watch_ids": (
+                "ALTER TABLE web_article_jobs ADD COLUMN notify_watch_ids "
+                "TEXT NOT NULL DEFAULT '[]'"
+            ),
+            "processed_watch_ids": (
+                "ALTER TABLE web_article_jobs ADD COLUMN processed_watch_ids "
+                "TEXT NOT NULL DEFAULT '[]'"
+            ),
+            "status": (
+                "ALTER TABLE web_article_jobs ADD COLUMN status "
+                "VARCHAR(32) NOT NULL DEFAULT 'pending'"
+            ),
+            "attempts": (
+                "ALTER TABLE web_article_jobs ADD COLUMN attempts "
+                "INTEGER NOT NULL DEFAULT 0"
+            ),
+            "last_error": "ALTER TABLE web_article_jobs ADD COLUMN last_error TEXT",
+            "next_retry_at": (
+                "ALTER TABLE web_article_jobs ADD COLUMN next_retry_at DATETIME"
+            ),
+            "processing_started_at": (
+                "ALTER TABLE web_article_jobs ADD COLUMN processing_started_at DATETIME"
+            ),
+            "created_at": (
+                "ALTER TABLE web_article_jobs ADD COLUMN created_at DATETIME"
             ),
         }
         for column, statement in additions.items():

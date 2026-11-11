@@ -9,7 +9,10 @@ from typing import ClassVar
 from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 
+import httpcore
 import httpx
+from httpcore._backends.auto import AutoBackend
+from httpcore._backends.base import AsyncNetworkBackend
 
 from app.config import get_settings
 
@@ -38,11 +41,19 @@ def _is_public_ip(value: str) -> bool:
 
 
 async def _resolve_public(hostname: str, port: int) -> bool:
+    return await _resolve_public_ip(hostname, port) is not None
+
+
+async def _resolve_public_ip(hostname: str | bytes, port: int) -> str | None:
+    """Resolve once and return the exact public address to connect to."""
+
+    if isinstance(hostname, bytes):
+        hostname = hostname.decode("ascii", errors="ignore")
     if hostname.casefold() in {
         "localhost",
         "localhost.localdomain",
     } or hostname.casefold().endswith(".localhost"):
-        return False
+        return None
     try:
         addresses = await asyncio.to_thread(
             socket.getaddrinfo,
@@ -51,9 +62,11 @@ async def _resolve_public(hostname: str, port: int) -> bool:
             type=socket.SOCK_STREAM,
         )
     except (OSError, socket.gaierror):
-        return False
+        return None
     resolved = {item[4][0] for item in addresses if item[4]}
-    return bool(resolved) and all(_is_public_ip(address) for address in resolved)
+    if not resolved or not all(_is_public_ip(address) for address in resolved):
+        return None
+    return min(resolved)
 
 
 async def _validate_public_url(url: str) -> bool:
@@ -152,6 +165,66 @@ def _extract_html(html: str) -> str | None:
     return _fallback_extract(html)
 
 
+class _PinnedPublicIPBackend(AsyncNetworkBackend):
+    """Connect to the address resolved immediately before opening the socket."""
+
+    def __init__(self) -> None:
+        self._backend = AutoBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options=None,
+    ):
+        address = await _resolve_public_ip(host, port)
+        if address is None:
+            raise OSError("Target host did not resolve to a public IP address")
+        # httpcore receives the original host separately for TLS SNI and the
+        # HTTP Host header; only the TCP destination is replaced with the
+        # address just validated.  This closes the DNS-rebinding TOCTOU gap.
+        return await self._backend.connect_tcp(
+            address,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(self, path: str, timeout: float | None = None, socket_options=None):
+        raise OSError("Unix sockets are not allowed for article extraction")
+
+    async def sleep(self, seconds: float) -> None:
+        await self._backend.sleep(seconds)
+
+
+class PinnedPublicIPTransport(httpx.AsyncHTTPTransport):
+    """HTTP transport with no environment proxy and IP-pinned connections."""
+
+    def __init__(self, *, limits: httpx.Limits | None = None) -> None:
+        from httpx._config import create_ssl_context
+
+        limits = limits or httpx.Limits(max_connections=3, max_keepalive_connections=3)
+        ssl_context = create_ssl_context(verify=True, cert=None, trust_env=False)
+        super().__init__(
+            verify=ssl_context,
+            trust_env=False,
+            proxy=None,
+            limits=limits,
+        )
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=ssl_context,
+            max_connections=limits.max_connections,
+            max_keepalive_connections=limits.max_keepalive_connections,
+            keepalive_expiry=limits.keepalive_expiry,
+            http1=True,
+            http2=False,
+            network_backend=_PinnedPublicIPBackend(),
+        )
+
+
 async def _read_response(response: httpx.Response) -> bytes | None:
     content_length = response.headers.get("Content-Length")
     if content_length:
@@ -223,6 +296,12 @@ async def _respect_domain_rate(url: str) -> None:
 async def extract_article(client: httpx.AsyncClient, url: str) -> str | None:
     """Extract public article text without bypassing site access controls."""
 
+    transport = getattr(client, "_transport", None)
+    if not isinstance(transport, (PinnedPublicIPTransport, httpx.MockTransport)):
+        # A normal AsyncClient may resolve through a proxy or perform its own
+        # DNS lookup after validation.  Refuse it instead of weakening the
+        # connection-level SSRF guarantee.
+        return None
     settings = get_settings()
     timeout = max(1.0, float(settings.web_article_timeout))
     current_url = url.strip()

@@ -1,9 +1,11 @@
 import httpx
 import pytest
 
+from app.admin.web_monitor import _russian_source_status
 from app.services.web_monitor.providers import RSSProvider
 from app.services.web_monitor.russian_sources import (
     RUSSIAN_MEDIA,
+    MediaSource,
     get_source_enabled,
     merge_rss_feeds,
     set_source_enabled,
@@ -75,3 +77,22 @@ async def test_disabled_feed_is_not_polled():
     finally:
         await feeds.client.aclose()
     assert requests == ["https://enabled.example/feed"]
+
+
+@pytest.mark.parametrize(
+    ("enabled", "rss_url", "status", "expected"),
+    [
+        (True, "https://example.test/feed", "ok", "🟢 Работает"),
+        (True, "https://example.test/feed", "unknown", "🟡 Не проверен"),
+        (True, "https://example.test/feed", "error", "🔴 Ошибка"),
+        (False, "https://example.test/feed", "ok", "⚪ Отключён"),
+        (True, None, "unavailable", "Нет прямого RSS"),
+    ],
+)
+def test_russian_source_status_labels(enabled, rss_url, status, expected):
+    item = {
+        "source": MediaSource("Test", "test.example", rss_url),
+        "enabled": enabled,
+        "status": status,
+    }
+    assert _russian_source_status(item) == expected
