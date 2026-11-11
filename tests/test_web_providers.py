@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -6,7 +6,11 @@ from sqlalchemy import select
 
 from app.database import session_scope
 from app.models import WebMediaEndpoint, WebMediaSource
-from app.services.web_monitor.media_registry import upsert_endpoint, upsert_source
+from app.services.web_monitor.media_registry import (
+    bulk_import_sources,
+    upsert_endpoint,
+    upsert_source,
+)
 from app.services.web_monitor.providers import (
     GDELTProvider,
     GoogleNewsRSSProvider,
@@ -91,6 +95,173 @@ async def test_rss_reports_total_failure():
         with pytest.raises(RSSProviderError) as error:
             await RSSProvider(client, ["https://broken.test/feed"]).fetch("")
     assert error.value.failed_urls == ("https://broken.test/feed",)
+
+
+@pytest.mark.asyncio
+async def test_rss_provider_limits_a_thousand_registered_feeds_to_one_batch():
+    rows = [
+        {
+            "name": f"RSS {index}",
+            "domain": f"rss-batch-{index}.example",
+            "rss_url": f"https://rss-batch-{index}.example/feed.xml",
+        }
+        for index in range(1000)
+    ]
+    await bulk_import_sources(rows, batch_size=100)
+    async with session_scope() as db:
+        await db.execute(
+            WebMediaSource.__table__.update().values(
+                enabled=True,
+                next_poll_at=datetime.now(UTC),
+            )
+        )
+        await db.execute(
+            WebMediaEndpoint.__table__.update().values(enabled=True)
+        )
+        await db.commit()
+
+    requests: list[str] = []
+
+    async def handler(request):
+        requests.append(str(request.url))
+        return httpx.Response(
+            200,
+            content=(
+                "<rss><channel><item><title>Batch item</title>"
+                f"<link>{request.url}/article</link></item></channel></rss>"
+            ),
+            request=request,
+        )
+
+    feeds = [
+        (f"RSS {index}", f"https://rss-batch-{index}.example/feed.xml")
+        for index in range(1000)
+    ]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        articles = await RSSProvider(client, feeds, max_concurrency=3).fetch()
+
+    assert len(requests) == 3
+    assert len(articles) == 3
+
+
+@pytest.mark.asyncio
+async def test_rss_provider_respects_source_interval_and_retries_after_error():
+    source = await upsert_source(
+        name="Scheduled RSS",
+        domain="scheduled-rss.example",
+        enabled=True,
+        poll_interval_seconds=300,
+    )
+    endpoint = await upsert_endpoint(
+        source.id,
+        "https://scheduled-rss.example/feed.xml",
+        kind="rss",
+    )
+    requests: list[str] = []
+    failed = True
+
+    async def handler(request):
+        nonlocal failed
+        requests.append(str(request.url))
+        if failed:
+            return httpx.Response(503, request=request)
+        return httpx.Response(
+            200,
+            content=(
+                "<rss><channel><item><title>Recovered</title>"
+                "<link>https://scheduled-rss.example/article</link>"
+                "</item></channel></rss>"
+            ),
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = RSSProvider(
+            client,
+            [("Scheduled RSS", "https://scheduled-rss.example/feed.xml")],
+            max_concurrency=1,
+        )
+        with pytest.raises(RSSProviderError):
+            await provider.fetch()
+        assert requests == ["https://scheduled-rss.example/feed.xml"]
+
+        async with session_scope() as db:
+            failed_source = await db.get(WebMediaSource, source.id)
+            failed_endpoint = await db.get(WebMediaEndpoint, endpoint.id)
+            assert failed_source.failure_count == 1
+            next_poll_at = failed_source.next_poll_at
+            if next_poll_at.tzinfo is None:
+                next_poll_at = next_poll_at.replace(tzinfo=UTC)
+            assert next_poll_at > datetime.now(UTC)
+            assert failed_endpoint.polling_started_at is None
+            await db.commit()
+
+        # A not-yet-due source is not fetched again.
+        await provider.fetch()
+        assert requests == ["https://scheduled-rss.example/feed.xml"]
+        failed = False
+        async with session_scope() as db:
+            failed_source = await db.get(WebMediaSource, source.id)
+            failed_source.next_poll_at = datetime.now(UTC) - timedelta(seconds=1)
+            await db.commit()
+        await provider.fetch()
+        assert requests == [
+            "https://scheduled-rss.example/feed.xml",
+            "https://scheduled-rss.example/feed.xml",
+        ]
+
+    async with session_scope() as db:
+        recovered_source = await db.get(WebMediaSource, source.id)
+        recovered_endpoint = await db.get(WebMediaEndpoint, endpoint.id)
+    assert recovered_source.failure_count == 0
+    assert recovered_endpoint.polling_started_at is None
+
+
+@pytest.mark.asyncio
+async def test_rss_provider_recovers_stale_claim_after_restart():
+    source = await upsert_source(
+        name="Restart RSS",
+        domain="restart-rss.example",
+        enabled=True,
+    )
+    endpoint = await upsert_endpoint(
+        source.id,
+        "https://restart-rss.example/feed.xml",
+        kind="rss",
+    )
+    stale_at = datetime.now(UTC) - timedelta(minutes=16)
+    async with session_scope() as db:
+        source_row = await db.get(WebMediaSource, source.id)
+        endpoint_row = await db.get(WebMediaEndpoint, endpoint.id)
+        source_row.polling_started_at = stale_at
+        endpoint_row.polling_started_at = stale_at
+        source_row.next_poll_at = datetime.now(UTC)
+        await db.commit()
+
+    async def handler(request):
+        return httpx.Response(
+            200,
+            content=(
+                "<rss><channel><item><title>Restarted</title>"
+                "<link>https://restart-rss.example/article</link>"
+                "</item></channel></rss>"
+            ),
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        articles = await RSSProvider(
+            client,
+            [("Restart RSS", "https://restart-rss.example/feed.xml")],
+            max_concurrency=1,
+        ).fetch()
+
+    assert [article.url for article in articles] == [
+        "https://restart-rss.example/article"
+    ]
+    async with session_scope() as db:
+        endpoint_row = await db.get(WebMediaEndpoint, endpoint.id)
+    assert endpoint_row.polling_started_at is None
 
 
 @pytest.mark.asyncio

@@ -480,13 +480,25 @@ async def get_enabled_sitemap_endpoints() -> list[WebMediaEndpoint]:
     return await get_enabled_endpoints("sitemap")
 
 
-async def claim_due_endpoints(kind: str, *, limit: int) -> list[WebMediaEndpoint]:
+async def claim_due_endpoints(
+    kind: str,
+    *,
+    limit: int,
+    urls: Iterable[str] | None = None,
+) -> list[WebMediaEndpoint]:
     """Claim due endpoints of one kind for a bounded polling batch."""
 
     if limit <= 0:
         return []
     now = datetime.now(UTC)
     stale_before = now - timedelta(minutes=15)
+    allowed_urls = set()
+    for url in urls or ():
+        raw_url = str(url).strip()
+        if raw_url:
+            allowed_urls.update(
+                {raw_url, raw_url.rstrip("/"), raw_url.rstrip("/") + "/"}
+            )
     async with session_scope() as db:
         await db.execute(
             WebMediaSource.__table__.update()
@@ -498,19 +510,22 @@ async def claim_due_endpoints(kind: str, *, limit: int) -> list[WebMediaEndpoint
             .where(WebMediaEndpoint.polling_started_at < stale_before)
             .values(polling_started_at=None)
         )
+        conditions = [
+            WebMediaSource.enabled.is_(True),
+            WebMediaEndpoint.enabled.is_(True),
+            WebMediaEndpoint.kind == kind,
+            (
+                WebMediaSource.next_poll_at.is_(None)
+                | (WebMediaSource.next_poll_at <= now)
+            ),
+            WebMediaSource.polling_started_at.is_(None),
+        ]
+        if allowed_urls:
+            conditions.append(WebMediaEndpoint.url.in_(allowed_urls))
         result = await db.execute(
             select(WebMediaSource.id)
             .join(WebMediaEndpoint, WebMediaEndpoint.source_id == WebMediaSource.id)
-            .where(
-                WebMediaSource.enabled.is_(True),
-                WebMediaEndpoint.enabled.is_(True),
-                WebMediaEndpoint.kind == kind,
-                (
-                    WebMediaSource.next_poll_at.is_(None)
-                    | (WebMediaSource.next_poll_at <= now)
-                ),
-                WebMediaSource.polling_started_at.is_(None),
-            )
+            .where(*conditions)
             .distinct()
             .order_by(WebMediaSource.next_poll_at, WebMediaSource.id)
             .limit(limit)
@@ -541,6 +556,16 @@ async def claim_due_endpoints(kind: str, *, limit: int) -> list[WebMediaEndpoint
         for endpoint in endpoints:
             db.expunge(endpoint)
         return endpoints
+
+
+async def get_registered_endpoint_urls(kind: str) -> set[str]:
+    """Return endpoint URLs known to the registry, including disabled ones."""
+
+    async with session_scope() as db:
+        result = await db.execute(
+            select(WebMediaEndpoint.url).where(WebMediaEndpoint.kind == kind)
+        )
+        return {url for (url,) in result.all()}
 
 
 async def get_enabled_endpoints(kind: str) -> list[WebMediaEndpoint]:

@@ -18,8 +18,10 @@ import httpx
 from app.config import get_settings
 from app.services.web_monitor.media_registry import (
     claim_due_endpoints,
+    get_registered_endpoint_urls,
     release_endpoint_poll,
     save_endpoint_check,
+    save_endpoint_statuses,
     save_sitemap_children,
     upsert_endpoint,
 )
@@ -234,6 +236,9 @@ class RSSProvider:
         )
         self._domain_locks: dict[str, asyncio.Lock] = {}
         self._domain_last_request: dict[str, float] = {}
+        self._url_locks: dict[str, asyncio.Lock] = {}
+        self._external_next_poll: dict[str, float] = {}
+        self._external_failure_count: dict[str, int] = {}
 
     @staticmethod
     def _feed_key(url: str) -> str:
@@ -314,43 +319,115 @@ class RSSProvider:
         active_feeds = self._active_feeds()
         if not active_feeds:
             return articles
-        queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(
-            maxsize=max(1, self.max_concurrency * 2)
+
+        active_urls = [url for _, url in active_feeds]
+        claimed_endpoints = await claim_due_endpoints(
+            "rss",
+            limit=self.max_concurrency,
+            urls=active_urls,
         )
-        workers = []
-
-        async def worker() -> None:
-            while True:
-                source_name, url = await queue.get()
-                try:
-                    feed_articles = await self._fetch_feed(source_name, url)
-                    articles.extend(feed_articles)
-                    status = {"status": "ok", "error": ""}
-                    self.feed_status[url] = status
-                    self.last_batch_status[url] = status
-                except Exception as exc:  # noqa: BLE001 - one feed must not stop the batch
-                    failed_urls.append(url)
-                    status = {"status": "error", "error": str(exc)}
-                    self.feed_status[url] = status
-                    self.last_batch_status[url] = status
-                    logger.warning("RSS feed %s failed: %s", url, exc)
-                finally:
-                    queue.task_done()
-
-        for _ in range(min(self.max_concurrency, len(active_feeds))):
-            workers.append(asyncio.create_task(worker()))
-        for feed in active_feeds:
-            await queue.put(feed)
-        await queue.join()
-        for task in workers:
-            task.cancel()
-        await asyncio.gather(*workers, return_exceptions=True)
-        if active_feeds and failed_urls and len(failed_urls) == len(active_feeds):
-            raise RSSProviderError(
-                f"All RSS feeds failed ({len(failed_urls)}/{len(active_feeds)})",
-                failed_urls,
+        try:
+            selected_endpoints = []
+            seen_endpoint_keys: set[str] = set()
+            for endpoint in claimed_endpoints:
+                key = self._feed_key(endpoint.url)
+                if key in seen_endpoint_keys or len(selected_endpoints) >= self.max_concurrency:
+                    continue
+                seen_endpoint_keys.add(key)
+                selected_endpoints.append(endpoint)
+            claimed_keys = {self._feed_key(endpoint.url) for endpoint in selected_endpoints}
+            registered_urls = await get_registered_endpoint_urls("rss")
+            registered_keys = {self._feed_key(url) for url in registered_urls}
+            now = monotonic()
+            external_feeds = [
+                feed
+                for feed in active_feeds
+                if self._feed_key(feed[1]) not in claimed_keys
+                and self._feed_key(feed[1]) not in registered_keys
+                and now >= self._external_next_poll.get(self._feed_key(feed[1]), 0)
+            ]
+            free_slots = max(0, self.max_concurrency - len(selected_endpoints))
+            external_feeds = external_feeds[:free_slots]
+            jobs = [
+                (
+                    next(
+                        (
+                            source_name
+                            for source_name, feed_url in active_feeds
+                            if self._feed_key(feed_url) == self._feed_key(endpoint.url)
+                        ),
+                        "RSS",
+                    ),
+                    endpoint.url,
+                    endpoint.id,
+                )
+                for endpoint in selected_endpoints
+            ]
+            jobs.extend((*feed, None) for feed in external_feeds)
+            if not jobs:
+                return articles
+            queue: asyncio.Queue[tuple[str, str, int | None]] = asyncio.Queue(
+                maxsize=max(1, self.max_concurrency * 2)
             )
-        return articles
+            workers = []
+
+            async def worker() -> None:
+                while True:
+                    source_name, url, endpoint_id = await queue.get()
+                    try:
+                        lock = self._url_locks.setdefault(
+                            self._feed_key(url), asyncio.Lock()
+                        )
+                        async with lock:
+                            feed_articles = await self._fetch_feed(source_name, url)
+                        articles.extend(feed_articles)
+                        status = {"status": "ok", "error": ""}
+                        self.feed_status[url] = status
+                        self.last_batch_status[url] = status
+                        if endpoint_id is None:
+                            key = self._feed_key(url)
+                            self._external_failure_count[key] = 0
+                            self._external_next_poll[key] = monotonic() + self.min_interval
+                    except Exception as exc:  # noqa: BLE001 - one feed must not stop the batch
+                        failed_urls.append(url)
+                        status = {"status": "error", "error": str(exc)}
+                        self.feed_status[url] = status
+                        self.last_batch_status[url] = status
+                        logger.warning("RSS feed %s failed: %s", url, exc)
+                        if endpoint_id is None:
+                            key = self._feed_key(url)
+                            failures = self._external_failure_count.get(key, 0) + 1
+                            self._external_failure_count[key] = failures
+                            self._external_next_poll[key] = monotonic() + min(
+                                self.min_interval * 2**min(failures, 3),
+                                900,
+                            )
+                    finally:
+                        queue.task_done()
+
+            for _ in range(min(self.max_concurrency, len(jobs))):
+                workers.append(asyncio.create_task(worker()))
+            try:
+                for job in jobs:
+                    await queue.put(job)
+                await queue.join()
+                await save_endpoint_statuses(self.last_batch_status)
+            finally:
+                for task in workers:
+                    task.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
+            if jobs and failed_urls and len(failed_urls) == len(jobs):
+                raise RSSProviderError(
+                    f"All RSS feeds failed ({len(failed_urls)}/{len(jobs)})",
+                    failed_urls,
+                )
+            return articles
+        finally:
+            for endpoint in claimed_endpoints:
+                try:
+                    await asyncio.shield(release_endpoint_poll(endpoint.id))
+                except Exception as exc:  # noqa: BLE001 - lease cleanup is best effort
+                    logger.error("Failed to release RSS lease %s: %s", endpoint.url, exc)
 
 
 class SitemapProvider:

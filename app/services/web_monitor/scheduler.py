@@ -15,8 +15,7 @@ from app.services.web_monitor.article_extractor import (
     extract_article,
 )
 from app.services.web_monitor.media_registry import (
-    claim_due_feed_definitions,
-    save_endpoint_statuses,
+    get_enabled_feed_definitions,
 )
 from app.services.web_monitor.providers import (
     GDELTProvider,
@@ -226,17 +225,20 @@ class WebMonitor:
         if not self._registry_rss_enabled:
             return
         settings = get_settings()
-        feeds = await claim_due_feed_definitions(
-            limit=settings.web_source_poll_concurrency,
-            include_catalog=settings.web_russian_media_enabled,
-            user_urls={url for _, url in self._user_rss_feeds},
-        )
-        if not feeds and not settings.web_russian_media_enabled:
-            # Keep legacy user feeds available even before the registry
-            # migration has run in an externally managed database.
-            feeds = self._user_rss_feeds
+        if settings.web_russian_media_enabled:
+            feeds = await get_enabled_feed_definitions()
+            known_urls = {url.rstrip("/").casefold() for _, url in feeds}
+            feeds.extend(
+                feed
+                for feed in self._user_rss_feeds
+                if feed[1].rstrip("/").casefold() not in known_urls
+            )
+        else:
+            # User-defined feeds remain available even when the built-in
+            # Russian media catalog is disabled.
+            feeds = list(self._user_rss_feeds)
         self._rss_provider.set_feeds(feeds)
-        self._rss_provider.set_enabled_urls({url for _, url in feeds})
+        self._rss_provider.set_enabled_urls(None)
 
     async def _ensure_article_workers(self) -> None:
         if self._article_workers_started:
@@ -412,7 +414,6 @@ class WebMonitor:
                 ok=status.get("status") == "ok",
                 error=status.get("error"),
             )
-        await save_endpoint_statuses(statuses)
 
     async def _check_provider(self, provider: WebProvider, watches) -> bool:
         lock = self._provider_locks.setdefault(provider.name, asyncio.Lock())
