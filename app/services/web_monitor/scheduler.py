@@ -15,7 +15,7 @@ from app.services.web_monitor.article_extractor import (
     extract_article,
 )
 from app.services.web_monitor.media_registry import (
-    get_enabled_feed_definitions,
+    claim_due_feed_definitions,
     save_endpoint_statuses,
 )
 from app.services.web_monitor.providers import (
@@ -121,6 +121,7 @@ class WebMonitor:
             ),
             PublicNewsPageProvider(self.client),
         ]
+        self._registry_rss_enabled = providers is None
         self.providers = default_providers if providers is None else providers
         self._rss_provider = next(
             (provider for provider in self.providers if isinstance(provider, RSSProvider)),
@@ -167,7 +168,8 @@ class WebMonitor:
         )
 
     def _schedule_next(self, provider: WebProvider) -> None:
-        self._next_allowed[provider.name] = monotonic() + max(30.0, provider.min_interval)
+        interval = 30.0 if provider.name == "rss" else provider.min_interval
+        self._next_allowed[provider.name] = monotonic() + max(30.0, interval)
 
     def _backoff(self, provider: WebProvider, retry_after: float | None = None) -> None:
         failures = self._failure_count.get(provider.name, 0) + 1
@@ -221,16 +223,20 @@ class WebMonitor:
     async def _refresh_russian_media_feeds(self) -> None:
         if self._rss_provider is None:
             return
-        registry_feeds = await get_enabled_feed_definitions()
-        if registry_feeds:
-            feeds = [*self._user_rss_feeds, *registry_feeds]
-        else:
-            feeds = merge_rss_feeds(self._user_rss_feeds)
+        if not self._registry_rss_enabled:
+            return
+        settings = get_settings()
+        feeds = await claim_due_feed_definitions(
+            limit=settings.web_source_poll_concurrency,
+            include_catalog=settings.web_russian_media_enabled,
+            user_urls={url for _, url in self._user_rss_feeds},
+        )
+        if not feeds and not settings.web_russian_media_enabled:
+            # Keep legacy user feeds available even before the registry
+            # migration has run in an externally managed database.
+            feeds = self._user_rss_feeds
         self._rss_provider.set_feeds(feeds)
-        if get_settings().web_russian_media_enabled:
-            self._rss_provider.set_enabled_urls({url for _, url in feeds})
-        else:
-            self._rss_provider.set_enabled_urls({url for _, url in self._user_rss_feeds})
+        self._rss_provider.set_enabled_urls({url for _, url in feeds})
 
     async def _ensure_article_workers(self) -> None:
         if self._article_workers_started:
@@ -253,6 +259,26 @@ class WebMonitor:
             exclude_job_ids=self._active_article_jobs | self._queued_article_jobs,
         ):
             await self._enqueue_article_job(job_id)
+
+    async def _schedule_source_autodiscovery(self) -> None:
+        if not get_settings().web_source_autodiscovery_enabled:
+            return
+        if self._autodiscovery_task is not None and not self._autodiscovery_task.done():
+            return
+        if self._autodiscovery_task is not None:
+            try:
+                self._autodiscovery_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Source autodiscovery task failed")
+        self._autodiscovery_task = asyncio.create_task(
+            process_pending_candidates(
+                self.client,
+                limit=get_settings().web_source_max_candidates_per_run,
+            ),
+            name="web-source-autodiscovery",
+        )
 
     async def _enqueue_article_job(self, job_id: int) -> bool:
         if job_id in self._queued_article_jobs or job_id in self._active_article_jobs:
@@ -376,7 +402,8 @@ class WebMonitor:
     async def _save_rss_statuses(self) -> None:
         if self._rss_provider is None:
             return
-        for url, status in self._rss_provider.feed_status.items():
+        statuses = self._rss_provider.last_batch_status
+        for url, status in statuses.items():
             source = source_for_url(url)
             if source is None:
                 continue
@@ -385,7 +412,7 @@ class WebMonitor:
                 ok=status.get("status") == "ok",
                 error=status.get("error"),
             )
-        await save_endpoint_statuses(self._rss_provider.feed_status)
+        await save_endpoint_statuses(statuses)
 
     async def _check_provider(self, provider: WebProvider, watches) -> bool:
         lock = self._provider_locks.setdefault(provider.name, asyncio.Lock())
@@ -466,11 +493,13 @@ class WebMonitor:
             return
         watches = await get_watches()
         self._last_check_at = datetime.now(UTC)
+        await self._schedule_source_autodiscovery()
         if not watches:
             return
         await self._ensure_article_workers()
         await self._recover_article_jobs()
-        await self._refresh_russian_media_feeds()
+        if self._rss_provider is None or self._is_due(self._rss_provider):
+            await self._refresh_russian_media_feeds()
         # Provider checks are independent and errors are contained by each
         # provider task.  No unbounded background tasks are left behind.
         tasks = [
@@ -479,22 +508,6 @@ class WebMonitor:
         ]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        if (
-            get_settings().web_source_autodiscovery_enabled
-            and (self._autodiscovery_task is None or self._autodiscovery_task.done())
-        ):
-            if self._autodiscovery_task is not None:
-                try:
-                    self._autodiscovery_task.result()
-                except (asyncio.CancelledError, Exception):
-                    logger.exception("Source autodiscovery task failed")
-            self._autodiscovery_task = asyncio.create_task(
-                process_pending_candidates(
-                    self.client,
-                    limit=get_settings().web_source_max_candidates_per_run,
-                ),
-                name="web-source-autodiscovery",
-            )
 
 
 _monitor: WebMonitor | None = None

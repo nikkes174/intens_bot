@@ -16,13 +16,14 @@ import httpx
 
 from app.config import get_settings
 from app.services.web_monitor.media_registry import (
-    get_enabled_sitemap_endpoints,
+    claim_due_endpoints,
     save_endpoint_check,
+    upsert_endpoint,
 )
 from app.services.web_monitor.rss_discovery import fetch_public_document
 from app.services.web_monitor.source_discovery import (
+    crawl_sitemap_tree,
     extract_news_page_links,
-    parse_sitemap_xml,
 )
 
 logger = logging.getLogger(__name__)
@@ -221,6 +222,7 @@ class RSSProvider:
                 self.feeds.append((str(source_name).strip() or "RSS", str(url).strip()))
         self._enabled_urls: set[str] | None = None
         self.feed_status: dict[str, dict[str, str]] = {}
+        self.last_batch_status: dict[str, dict[str, str]] = {}
         self.max_concurrency = max(
             1,
             max_concurrency or get_settings().web_source_poll_concurrency,
@@ -303,6 +305,7 @@ class RSSProvider:
     async def fetch(self, query: str = "") -> list[WebArticle]:
         articles: list[WebArticle] = []
         failed_urls: list[str] = []
+        self.last_batch_status = {}
         active_feeds = self._active_feeds()
         if not active_feeds:
             return articles
@@ -317,10 +320,14 @@ class RSSProvider:
                 try:
                     feed_articles = await self._fetch_feed(source_name, url)
                     articles.extend(feed_articles)
-                    self.feed_status[url] = {"status": "ok", "error": ""}
+                    status = {"status": "ok", "error": ""}
+                    self.feed_status[url] = status
+                    self.last_batch_status[url] = status
                 except Exception as exc:  # noqa: BLE001 - one feed must not stop the batch
                     failed_urls.append(url)
-                    self.feed_status[url] = {"status": "error", "error": str(exc)}
+                    status = {"status": "error", "error": str(exc)}
+                    self.feed_status[url] = status
+                    self.last_batch_status[url] = status
                     logger.warning("RSS feed %s failed: %s", url, exc)
                 finally:
                     queue.task_done()
@@ -354,41 +361,58 @@ class SitemapProvider:
             max_concurrency or get_settings().web_source_poll_concurrency,
         )
         self.endpoint_status: dict[str, dict[str, str]] = {}
+        self._url_locks: dict[str, asyncio.Lock] = {}
 
     async def _fetch_endpoint(self, endpoint) -> list[WebArticle]:
-        headers = {}
-        if endpoint.etag:
-            headers["If-None-Match"] = endpoint.etag
-        if endpoint.last_modified:
-            headers["If-Modified-Since"] = endpoint.last_modified
-        document = await fetch_public_document(
+        async def fetch_document(url: str):
+            lock = self._url_locks.setdefault(url, asyncio.Lock())
+            async with lock:
+                cached_endpoint = endpoint
+                if url != endpoint.url:
+                    cached_endpoint = await upsert_endpoint(
+                        endpoint.source_id,
+                        url,
+                        kind="sitemap",
+                        enabled=True,
+                        discovered_by="sitemap_index",
+                    )
+                headers = {}
+                if cached_endpoint.etag:
+                    headers["If-None-Match"] = cached_endpoint.etag
+                if cached_endpoint.last_modified:
+                    headers["If-Modified-Since"] = cached_endpoint.last_modified
+                try:
+                    document = await fetch_public_document(
+                        self.client,
+                        url,
+                        conditional_headers=headers,
+                    )
+                except Exception as exc:
+                    await save_endpoint_check(
+                        cached_endpoint.id,
+                        status="error",
+                        error=str(exc),
+                    )
+                    raise
+                unchanged = document.status_code == 304 or (
+                    cached_endpoint.content_hash
+                    and cached_endpoint.content_hash == document.content_hash
+                )
+                await save_endpoint_check(
+                    cached_endpoint.id,
+                    status="ok",
+                    http_status=document.status_code,
+                    etag=document.headers.get("etag"),
+                    last_modified=document.headers.get("last-modified"),
+                    content_hash=document.content_hash or cached_endpoint.content_hash,
+                )
+                return document, not unchanged
+
+        tree = await crawl_sitemap_tree(
             self.client,
             endpoint.url,
-            conditional_headers=headers,
+            fetcher=fetch_document,
         )
-        if document.status_code == 304 or (
-            endpoint.content_hash and endpoint.content_hash == document.content_hash
-        ):
-            await save_endpoint_check(
-                endpoint.id,
-                status="ok",
-                http_status=document.status_code,
-                etag=document.headers.get("etag"),
-                last_modified=document.headers.get("last-modified"),
-                content_hash=document.content_hash or endpoint.content_hash,
-            )
-            return []
-        parsed = parse_sitemap_xml(document.content)
-        if parsed.kind == "index":
-            await save_endpoint_check(
-                endpoint.id,
-                status="ok",
-                http_status=document.status_code,
-                etag=document.headers.get("etag"),
-                last_modified=document.headers.get("last-modified"),
-                content_hash=document.content_hash,
-            )
-            return []
         domain = urlsplit(endpoint.url).hostname or "sitemap"
         articles = [
             WebArticle(
@@ -398,23 +422,18 @@ class SitemapProvider:
                 source_name=domain,
                 published_at=entry.published_at or entry.lastmod,
             )
-            for entry in parsed.entries
+            for entry in tree.entries
         ]
-        await save_endpoint_check(
-            endpoint.id,
-            status="ok",
-            http_status=document.status_code,
-            etag=document.headers.get("etag"),
-            last_modified=document.headers.get("last-modified"),
-            content_hash=document.content_hash,
-        )
         return articles
 
 
     async def fetch(self, query: str = "") -> list[WebArticle]:
         if not get_settings().web_sitemap_enabled:
             return []
-        endpoints = await get_enabled_sitemap_endpoints()
+        endpoints = await claim_due_endpoints(
+            "sitemap",
+            limit=self.max_concurrency,
+        )
         if not endpoints:
             return []
         queue: asyncio.Queue = asyncio.Queue(maxsize=max(1, self.max_concurrency * 2))

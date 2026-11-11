@@ -148,6 +148,9 @@ async def _render_registry(
         f"Городские/районные: {summary['category_local']}  Деловые: {summary['category_business']}\n"
         f"Технологические: {summary['category_technology']}  Отраслевые: {summary['category_industry']}\n"
         f"Автообнаружение: {'включено' if settings.web_source_autodiscovery_enabled else 'выключено'}"
+        f"\nПроверка каталога: {summary['candidate_pending']} ожидают, "
+        f"{summary['candidate_checking']} проверяются, "
+        f"{summary['candidate_approved']} подключены"
         f"{filters}"
     )
     return text, web_registry_keyboard(page, total_pages, items)
@@ -560,12 +563,25 @@ async def web_registry_source(callback: CallbackQuery):
         f"• {endpoint.kind}: {escape(endpoint.url)} — {endpoint.status}"
         for endpoint in endpoints[:20]
     ) or "Нет проверенных способов получения публикаций"
+    last_polled = (
+        source.last_polled_at.strftime("%Y-%m-%d %H:%M:%S")
+        if source.last_polled_at
+        else "—"
+    )
+    next_poll = (
+        source.next_poll_at.strftime("%Y-%m-%d %H:%M:%S")
+        if source.next_poll_at
+        else "—"
+    )
     text = (
         f"🌐 {escape(source.name or source.domain)}\n\n"
         f"Домен: {escape(source.domain)}\n"
         f"Категория: {escape(SOURCE_CATEGORIES.get(source.category, source.category))}\n"
         f"Регион: {escape(source.region or '—')}\n"
         f"Статус: {_registry_status_label(source)}\n"
+        f"Последний опрос: {last_polled}\n"
+        f"Следующий опрос: {next_poll}\n"
+        f"Ошибок подряд: {source.failure_count}\n"
         f"Ошибка: {escape(source.error or '—')}\n\n"
         f"Методы:\n{endpoint_text}"
     )

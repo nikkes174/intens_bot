@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import calendar
+import email.utils
 import re
+from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 from xml.etree import ElementTree
 
 import feedparser
@@ -35,6 +39,23 @@ class SitemapParseResult:
 
 
 @dataclass(frozen=True)
+class SitemapDocument:
+    url: str
+    depth: int
+    document: PublicDocument
+    parsed: SitemapParseResult | None
+    changed: bool
+
+
+@dataclass(frozen=True)
+class SitemapTreeResult:
+    documents: tuple[SitemapDocument, ...] = ()
+    entries: tuple[SitemapEntry, ...] = ()
+    errors: tuple[str, ...] = ()
+    total_bytes: int = 0
+
+
+@dataclass(frozen=True)
 class SourceDiscoveryResult:
     domain: str
     feeds: tuple[str, ...] = ()
@@ -54,6 +75,18 @@ class SourceDiscoveryResult:
             methods.append("news_page")
         return tuple(methods)
 
+    @property
+    def publication_count(self) -> int:
+        return len({entry.url for entry in self.sample_entries if entry.url})
+
+    @property
+    def dated_publication_count(self) -> int:
+        return sum(
+            1
+            for entry in self.sample_entries
+            if entry.published_at is not None or entry.lastmod is not None
+        )
+
 
 def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1].casefold()
@@ -68,6 +101,23 @@ def _parse_datetime(value: str | None) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _feed_entry_datetime(entry) -> datetime | None:
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if isinstance(parsed, tuple):
+        try:
+            return datetime.fromtimestamp(calendar.timegm(parsed), tz=UTC)
+        except (OverflowError, TypeError, ValueError):
+            return None
+    raw = entry.get("published") or entry.get("updated")
+    if isinstance(raw, str):
+        try:
+            value = email.utils.parsedate_to_datetime(raw)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    return None
 
 
 def _safe_xml(content: bytes):
@@ -110,6 +160,114 @@ def parse_sitemap_xml(content: bytes) -> SitemapParseResult:
     return SitemapParseResult(kind="urlset", entries=tuple(entries))
 
 
+def _canonical_sitemap_url(value: str) -> str:
+    parts = urlsplit((value or "").strip())
+    if (
+        parts.scheme.casefold() not in {"http", "https"}
+        or not parts.hostname
+        or parts.username
+        or parts.password
+    ):
+        raise ValueError("Небезопасный URL sitemap")
+    return urlunsplit(
+        (
+            parts.scheme.casefold(),
+            parts.netloc.casefold(),
+            parts.path or "/",
+            parts.query,
+            "",
+        )
+    )
+
+
+async def crawl_sitemap_tree(
+    client: httpx.AsyncClient,
+    root_url: str,
+    *,
+    fetcher: Callable[[str], Awaitable[tuple[PublicDocument, bool]]] | None = None,
+    max_depth: int | None = None,
+    max_documents: int | None = None,
+    max_bytes: int | None = None,
+) -> SitemapTreeResult:
+    """Fetch a bounded sitemap tree, including nested indexes and cycles safely."""
+
+    settings = get_settings()
+    max_depth = max_depth or settings.web_source_max_sitemap_depth
+    max_documents = max_documents or settings.web_source_max_sitemap_documents
+    max_bytes = max_bytes or settings.web_source_max_sitemap_bytes
+    fetcher = fetcher or (
+        lambda url: _fetch_sitemap_document(client, url)
+    )
+    pending = deque([(_canonical_sitemap_url(root_url), 0)])
+    visited: set[str] = set()
+    documents: list[SitemapDocument] = []
+    entries: list[SitemapEntry] = []
+    errors: list[str] = []
+    total_bytes = 0
+    while pending and len(documents) < max_documents:
+        sitemap_url, depth = pending.popleft()
+        if sitemap_url in visited:
+            continue
+        visited.add(sitemap_url)
+        if depth > max_depth:
+            errors.append(f"{sitemap_url}: превышена глубина sitemap")
+            continue
+        try:
+            document, changed = await fetcher(sitemap_url)
+            total_bytes += len(document.content)
+            if total_bytes > max_bytes:
+                errors.append("Превышен общий лимит данных sitemap")
+                break
+            parsed = None
+            if changed and document.status_code != 304:
+                try:
+                    parsed = parse_sitemap_xml(document.content)
+                except (ElementTree.ParseError, ValueError) as exc:
+                    if depth == 0:
+                        raise
+                    errors.append(f"{sitemap_url}: {exc}")
+                    continue
+            documents.append(
+                SitemapDocument(
+                    url=sitemap_url,
+                    depth=depth,
+                    document=document,
+                    parsed=parsed,
+                    changed=changed,
+                )
+            )
+            if parsed is None:
+                continue
+            entries.extend(parsed.entries)
+            for child_url in parsed.sitemap_urls:
+                try:
+                    canonical_child = _canonical_sitemap_url(child_url)
+                except ValueError as exc:
+                    errors.append(f"{sitemap_url}: {exc}")
+                    continue
+                if canonical_child not in visited:
+                    pending.append((canonical_child, depth + 1))
+        except (OSError, PermissionError, ValueError, httpx.HTTPError) as exc:
+            if depth == 0:
+                raise
+            errors.append(f"{sitemap_url}: {exc}")
+    if pending and len(documents) >= max_documents:
+        errors.append("Достигнут лимит документов sitemap")
+    return SitemapTreeResult(
+        documents=tuple(documents),
+        entries=tuple(entries[: settings.web_source_max_sitemap_entries]),
+        errors=tuple(errors),
+        total_bytes=total_bytes,
+    )
+
+
+async def _fetch_sitemap_document(
+    client: httpx.AsyncClient,
+    url: str,
+) -> tuple[PublicDocument, bool]:
+    return await fetch_public_document(client, url), True
+
+
 async def _fetch_robots_sitemaps(client: httpx.AsyncClient, origin: str) -> list[str]:
     try:
         document = await fetch_public_document(
@@ -137,29 +295,45 @@ async def discover_sitemaps(
     candidates = [urljoin(origin, path) for path in _SITEMAP_PATHS]
     candidates.extend(await _fetch_robots_sitemaps(client, origin))
     candidates = list(dict.fromkeys(candidates))[: get_settings().web_source_max_sitemaps_per_domain]
-    verified: list[str] = []
     entries: list[SitemapEntry] = []
+    verified: list[str] = []
     errors: list[str] = []
-    pending = list(candidates)
-    visited: set[str] = set()
-    while pending and len(verified) < get_settings().web_source_max_sitemaps_per_domain:
-        sitemap_url = pending.pop(0)
-        if sitemap_url in visited:
-            continue
-        visited.add(sitemap_url)
-        try:
-            document = await fetch_public_document(client, sitemap_url)
-            parsed = parse_sitemap_xml(document.content)
-        except (OSError, PermissionError, ValueError, httpx.HTTPError) as exc:
-            errors.append(f"{sitemap_url}: {exc}")
-            continue
-        verified.append(sitemap_url)
-        pending.extend(parsed.sitemap_urls)
-        entries.extend(parsed.entries)
-        if len(entries) >= get_settings().web_source_max_sitemap_entries:
-            entries = entries[: get_settings().web_source_max_sitemap_entries]
+    seen_documents: set[str] = set()
+    remaining_documents = get_settings().web_source_max_sitemap_documents
+    remaining_bytes = get_settings().web_source_max_sitemap_bytes
+    for candidate in candidates:
+        if remaining_documents <= 0 or remaining_bytes <= 0:
             break
-    return verified, entries, errors
+        try:
+            canonical_candidate = _canonical_sitemap_url(candidate)
+        except ValueError as exc:
+            errors.append(f"{candidate}: {exc}")
+            continue
+        if canonical_candidate in seen_documents:
+            continue
+        try:
+            tree = await crawl_sitemap_tree(
+                client,
+                canonical_candidate,
+                max_documents=remaining_documents,
+                max_bytes=remaining_bytes,
+            )
+        except (OSError, PermissionError, ValueError, httpx.HTTPError) as exc:
+            errors.append(f"{candidate}: {exc}")
+            continue
+        verified.extend(document.url for document in tree.documents)
+        seen_documents.update(document.url for document in tree.documents)
+        entries.extend(tree.entries)
+        errors.extend(tree.errors)
+        remaining_documents -= len(tree.documents)
+        remaining_bytes -= tree.total_bytes
+        if len(entries) >= get_settings().web_source_max_sitemap_entries:
+            break
+    return (
+        list(dict.fromkeys(verified))[: get_settings().web_source_max_sitemaps_per_domain],
+        entries[: get_settings().web_source_max_sitemap_entries],
+        errors,
+    )
 
 
 class _ArticleLinkParser(HTMLParser):
@@ -218,6 +392,7 @@ async def inspect_source(client: httpx.AsyncClient, domain: str) -> SourceDiscov
                     entries.extend(
                         SitemapEntry(
                             url=str(entry.get("link") or feed_url),
+                            published_at=_feed_entry_datetime(entry),
                             title=str(entry.get("title") or ""),
                         )
                         for entry in parsed_feed.entries[:5]

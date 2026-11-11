@@ -149,6 +149,41 @@ def _migrate_sqlite(sync_conn):
         for column, statement in additions.items():
             if column not in columns:
                 sync_conn.execute(text(statement))
+    if "web_media_sources" in tables:
+        columns = {col["name"] for col in inspector.get_columns("web_media_sources")}
+        additions = {
+            "poll_interval_seconds": (
+                "ALTER TABLE web_media_sources ADD COLUMN poll_interval_seconds "
+                "INTEGER NOT NULL DEFAULT 300"
+            ),
+            "next_poll_at": "ALTER TABLE web_media_sources ADD COLUMN next_poll_at DATETIME",
+            "last_polled_at": "ALTER TABLE web_media_sources ADD COLUMN last_polled_at DATETIME",
+            "failure_count": (
+                "ALTER TABLE web_media_sources ADD COLUMN failure_count "
+                "INTEGER NOT NULL DEFAULT 0"
+            ),
+            "polling_started_at": (
+                "ALTER TABLE web_media_sources ADD COLUMN polling_started_at DATETIME"
+            ),
+        }
+        for column, statement in additions.items():
+            if column not in columns:
+                sync_conn.execute(text(statement))
+        sync_conn.execute(text("DROP INDEX IF EXISTS ix_web_media_sources_polling"))
+        sync_conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_web_media_sources_polling "
+                "ON web_media_sources (enabled, next_poll_at, status)"
+            )
+        )
+    if "web_media_endpoints" in tables:
+        columns = {col["name"] for col in inspector.get_columns("web_media_endpoints")}
+        if "polling_started_at" not in columns:
+            sync_conn.execute(
+                text(
+                    "ALTER TABLE web_media_endpoints ADD COLUMN polling_started_at DATETIME"
+                )
+            )
 
 
 async def close_database():

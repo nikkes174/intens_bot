@@ -242,6 +242,19 @@ class WebMediaSource(Base):
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     origin: Mapped[str] = mapped_column(String(32), nullable=False, default="catalog")
     managed_by_user: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    poll_interval_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=300
+    )
+    next_poll_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_polled_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    polling_started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -255,7 +268,7 @@ class WebMediaSource(Base):
     __table_args__ = (
         Index("ix_web_media_sources_status", "status"),
         Index("ix_web_media_sources_category_region", "category", "region"),
-        Index("ix_web_media_sources_polling", "enabled", "status", "last_checked_at"),
+        Index("ix_web_media_sources_polling", "enabled", "next_poll_at", "status"),
     )
 
 
@@ -285,6 +298,9 @@ class WebMediaEndpoint(Base):
     etag: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     last_modified: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     content_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    polling_started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

@@ -23,6 +23,16 @@ from app.services.web_monitor.providers import WebArticle
 from app.services.web_monitor.source_discovery import SourceDiscoveryResult, inspect_source
 
 _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
+_NEWS_RE = re.compile(
+    r"(?:новост|событ|сообщ|пресс|происшеств|политик|экономик|обществен|"
+    r"news|press|article)",
+    re.IGNORECASE,
+)
+_SPAM_RE = re.compile(
+    r"(?:купить|цена|скидк|каталог|казино|ставк|кредит|промокод|"
+    r"заработ|партнёрск|партнерск)",
+    re.IGNORECASE,
+)
 
 
 def domain_from_url(url: str) -> str | None:
@@ -38,14 +48,33 @@ def _looks_russian_information_resource(
     *,
     name: str = "",
 ) -> bool:
-    # A .ru/.рф suffix is only a weak signal.  A verified feed or sitemap must
-    # contain actual publication records, and non-Russian TLDs need Cyrillic
-    # evidence in the source name or sitemap sample.
-    cyrillic_text = " ".join(
-        [name, *(entry.title for entry in result.sample_entries)]
+    # A .ru/.рф suffix is only a weak signal. Require several distinct sample
+    # publications, dates, a news/information signal and Russian-language
+    # evidence. This keeps discovery conservative for catalogs, shops and SEO
+    # pages while allowing Russian-language resources on any TLD.
+    entries = [entry for entry in result.sample_entries if entry.url]
+    if not result.methods or len({entry.url for entry in entries}) < 2:
+        return False
+    dated_count = sum(
+        1
+        for entry in entries
+        if entry.published_at is not None or entry.lastmod is not None
     )
-    has_cyrillic = bool(_CYRILLIC_RE.search(cyrillic_text))
-    return bool(result.methods) and has_cyrillic
+    if dated_count < 2:
+        return False
+    text = " ".join(
+        [
+            name,
+            *(entry.title for entry in entries),
+            *(entry.url for entry in entries),
+        ]
+    )
+    if not _CYRILLIC_RE.search(text) or _SPAM_RE.search(text):
+        return False
+    if not _NEWS_RE.search(text):
+        return False
+    titles = [entry.title.casefold().strip() for entry in entries if entry.title.strip()]
+    return len(titles) < 2 or len(set(titles)) > 1
 
 
 async def observe_article_source(article: WebArticle) -> int | None:
@@ -167,7 +196,7 @@ async def process_pending_candidates(
                     reason="; ".join(result.errors) or "RSS/Atom и sitemap не найдены",
                     retry_after=timedelta(hours=6) if candidate.attempts < 3 else None,
                 )
-        except (OSError, PermissionError, ValueError, httpx.HTTPError) as exc:
+        except Exception as exc:  # noqa: BLE001 - persist every failed candidate
             await finish_candidate(
                 candidate.id,
                 status="temporary_error" if candidate.attempts < 3 else "rejected",

@@ -1,11 +1,18 @@
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import func, select
 
 from app.database import session_scope
-from app.models import WebMediaCandidate, WebMediaSource
+from app.models import WebMediaCandidate, WebMediaEndpoint, WebMediaSource
 from app.services.web_monitor.media_registry import (
     bulk_import_sources,
+    claim_due_feed_definitions,
     get_enabled_feed_definitions,
     normalize_domain,
+    save_endpoint_statuses,
+    set_source_enabled,
+    upsert_endpoint,
+    upsert_source,
 )
 from app.services.web_monitor.providers import WebArticle
 from app.services.web_monitor.source_autodiscovery import (
@@ -60,6 +67,16 @@ async def test_provider_domain_is_saved_as_candidate_without_network_check():
         candidate = await db.get(WebMediaCandidate, candidate_id)
     assert candidate is not None
     assert candidate.status == "pending"
+    repeated_id = await observe_article_source(
+        WebArticle(
+            provider="google_news",
+            title="Та же публикация",
+            url="https://www.candidate.example/news/2",
+            source_name="Кандидат",
+            published_at=None,
+        )
+    )
+    assert repeated_id == candidate_id
 
 
 async def test_autodiscovery_does_not_activate_non_russian_candidate(monkeypatch):
@@ -93,3 +110,188 @@ async def test_autodiscovery_does_not_activate_non_russian_candidate(monkeypatch
         )
     assert candidate.status == "pending_review"
     assert source is None
+
+
+async def test_imported_source_is_queued_and_automatically_verified(monkeypatch):
+    result = await bulk_import_sources(
+        [
+            {
+                "name": "Новости России",
+                "domain": "imported.example",
+                "category": "federal",
+            }
+        ]
+    )
+    assert result["imported"] == 1
+
+    async def fake_inspect(*args, **kwargs):
+        return SourceDiscoveryResult(
+            domain="imported.example",
+            feeds=("https://imported.example/feed.xml",),
+            sample_entries=(
+                SitemapEntry(
+                    url="https://imported.example/news/1",
+                    title="Новости региона: первое событие",
+                    published_at=datetime(2026, 11, 11, 10, tzinfo=UTC),
+                ),
+                SitemapEntry(
+                    url="https://imported.example/news/2",
+                    title="Новости региона: второе событие",
+                    published_at=datetime(2026, 11, 11, 9, tzinfo=UTC),
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(
+        "app.services.web_monitor.source_autodiscovery.inspect_source",
+        fake_inspect,
+    )
+    await process_pending_candidates(object(), limit=1)
+
+    async with session_scope() as db:
+        source = await db.scalar(
+            select(WebMediaSource).where(WebMediaSource.domain == "imported.example")
+        )
+        candidate = await db.scalar(
+            select(WebMediaCandidate).where(
+                WebMediaCandidate.domain == "imported.example"
+            )
+        )
+        endpoint = await db.scalar(
+            select(WebMediaEndpoint).where(
+                WebMediaEndpoint.url == "https://imported.example/feed.xml"
+            )
+        )
+    assert source.enabled is True
+    assert source.status == "ok"
+    assert candidate.status == "approved"
+    assert endpoint.enabled is True
+
+
+async def test_imported_source_check_recovers_after_restart(monkeypatch):
+    await bulk_import_sources(
+        [{"name": "Восстановление", "domain": "restart.example"}]
+    )
+    async with session_scope() as db:
+        candidate = await db.scalar(
+            select(WebMediaCandidate).where(
+                WebMediaCandidate.domain == "restart.example"
+            )
+        )
+        candidate.status = "checking"
+        candidate.last_checked_at = datetime.now(UTC) - timedelta(minutes=20)
+        await db.commit()
+
+    async def fake_inspect(*args, **kwargs):
+        return SourceDiscoveryResult(domain="restart.example")
+
+    monkeypatch.setattr(
+        "app.services.web_monitor.source_autodiscovery.inspect_source",
+        fake_inspect,
+    )
+    await process_pending_candidates(object(), limit=1)
+
+    async with session_scope() as db:
+        candidate = await db.scalar(
+            select(WebMediaCandidate).where(
+                WebMediaCandidate.domain == "restart.example"
+            )
+        )
+    assert candidate.status == "temporary_error"
+    assert candidate.attempts == 1
+
+
+async def test_manual_disable_is_preserved_when_import_check_succeeds(monkeypatch):
+    await bulk_import_sources(
+        [{"name": "Отключённый сайт", "domain": "disabled.example"}]
+    )
+    async with session_scope() as db:
+        source = await db.scalar(
+            select(WebMediaSource).where(WebMediaSource.domain == "disabled.example")
+        )
+    await set_source_enabled(source.id, False)
+
+    async def fake_inspect(*args, **kwargs):
+        return SourceDiscoveryResult(
+            domain="disabled.example",
+            feeds=("https://disabled.example/feed.xml",),
+            sample_entries=(
+                SitemapEntry(
+                    url="https://disabled.example/news/1",
+                    title="Новости: одно событие",
+                    published_at=datetime(2026, 11, 11, 10, tzinfo=UTC),
+                ),
+                SitemapEntry(
+                    url="https://disabled.example/news/2",
+                    title="Новости: другое событие",
+                    published_at=datetime(2026, 11, 11, 9, tzinfo=UTC),
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(
+        "app.services.web_monitor.source_autodiscovery.inspect_source",
+        fake_inspect,
+    )
+    await process_pending_candidates(object(), limit=1)
+
+    async with session_scope() as db:
+        source = await db.scalar(
+            select(WebMediaSource).where(WebMediaSource.domain == "disabled.example")
+        )
+    assert source.enabled is False
+    assert source.managed_by_user is True
+
+
+async def test_sources_are_claimed_independently_and_backoff_is_persisted():
+    first = await upsert_source(
+        name="Первый",
+        domain="first.example",
+        enabled=True,
+        poll_interval_seconds=30,
+    )
+    second = await upsert_source(
+        name="Второй",
+        domain="second.example",
+        enabled=True,
+        poll_interval_seconds=60,
+    )
+    await upsert_endpoint(first.id, "https://first.example/feed.xml", kind="rss")
+    await upsert_endpoint(second.id, "https://second.example/feed.xml", kind="rss")
+    async with session_scope() as db:
+        await db.execute(
+            WebMediaSource.__table__.update()
+            .where(
+                WebMediaSource.domain.not_in({"first.example", "second.example"})
+            )
+            .values(next_poll_at=datetime.now(UTC) + timedelta(hours=1))
+        )
+        await db.commit()
+
+    claimed = await claim_due_feed_definitions(limit=1)
+    assert len(claimed) == 1
+    claimed_url = claimed[0][1]
+    second_claim = await claim_due_feed_definitions(limit=1)
+    assert len(second_claim) == 1
+    assert second_claim[0][1] != claimed_url
+    await save_endpoint_statuses(
+        {claimed_url: {"status": "error", "error": "temporary"}}
+    )
+
+    async with session_scope() as db:
+        source = await db.scalar(
+            select(WebMediaSource).where(WebMediaSource.domain == "first.example")
+        )
+    assert source.failure_count == 1
+    assert source.next_poll_at is not None
+    next_poll_at = source.next_poll_at
+    if next_poll_at.tzinfo is None:
+        next_poll_at = next_poll_at.replace(tzinfo=UTC)
+    assert next_poll_at > datetime.now(UTC)
+
+    await set_source_enabled(second.id, False)
+    async with session_scope() as db:
+        source = await db.scalar(
+            select(WebMediaSource).where(WebMediaSource.domain == "second.example")
+        )
+    assert source.status == "disabled"

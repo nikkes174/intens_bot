@@ -113,6 +113,7 @@ async def _upsert_source(
     discovery_methods: Iterable[str] = (),
     origin: str = "catalog",
     managed_by_user: bool = False,
+    poll_interval_seconds: int | None = None,
 ) -> WebMediaSource:
     normalized_domain = normalize_domain(domain)
     source = await db.scalar(
@@ -130,6 +131,11 @@ async def _upsert_source(
             discovery_methods=_encode_methods(discovery_methods),
             origin=origin,
             managed_by_user=managed_by_user,
+            poll_interval_seconds=max(
+                30,
+                poll_interval_seconds or get_settings().web_russian_media_interval,
+            ),
+            next_poll_at=datetime.now(UTC) if enabled else None,
         )
         db.add(source)
         await db.flush()
@@ -147,8 +153,10 @@ async def _upsert_source(
             source.rss_url = rss_url
         source_methods = _decode_methods(source.discovery_methods)
         source.discovery_methods = _encode_methods([*source_methods, *discovery_methods])
-        if origin == "env":
+        if origin in {"env", "autodiscovery"}:
             source.enabled = True
+            source.status = status
+            source.next_poll_at = datetime.now(UTC)
     return source
 
 
@@ -164,6 +172,7 @@ async def upsert_source(
     discovery_methods: Iterable[str] = (),
     origin: str = "catalog",
     managed_by_user: bool = False,
+    poll_interval_seconds: int | None = None,
 ) -> WebMediaSource:
     async with session_scope() as db:
         source = await _upsert_source(
@@ -178,6 +187,7 @@ async def upsert_source(
             discovery_methods=discovery_methods,
             origin=origin,
             managed_by_user=managed_by_user,
+            poll_interval_seconds=poll_interval_seconds,
         )
         await db.commit()
         await db.refresh(source)
@@ -258,6 +268,24 @@ async def bulk_import_sources(rows: Iterable[dict[str, str]], *, batch_size: int
                     discovery_methods=["import"],
                     origin="import",
                 )
+                candidate_exists = await db.scalar(
+                    select(WebMediaCandidate.id).where(
+                        WebMediaCandidate.domain == domain
+                    )
+                )
+                if candidate_exists is None:
+                    db.add(
+                        WebMediaCandidate(
+                            domain=domain,
+                            name=(row.get("name", "") or domain)[:255],
+                            region=row.get("region") or None,
+                            category=_validate_category(row.get("category")),
+                            source_url=(f"https://{domain}"),
+                            discovered_by="import",
+                            status="pending",
+                            next_check_at=datetime.now(UTC),
+                        )
+                    )
                 if rss_url:
                     db.add(
                         WebMediaEndpoint(
@@ -365,8 +393,153 @@ async def get_enabled_feed_definitions() -> list[tuple[str, str]]:
         return pairs
 
 
+async def claim_due_feed_definitions(
+    *,
+    limit: int,
+    include_catalog: bool = True,
+    user_urls: set[str] | None = None,
+) -> list[tuple[str, str]]:
+    """Claim due RSS sources and return their feeds for one polling batch.
+
+    The claim is persisted, so a second scheduler instance or a process that
+    restarts mid-request will not poll the same source concurrently. Stale
+    claims are released after fifteen minutes.
+    """
+
+    if limit <= 0:
+        return []
+    now = datetime.now(UTC)
+    stale_before = now - timedelta(minutes=15)
+    user_url_values = set()
+    for url in user_urls or set():
+        raw_url = url.strip()
+        if raw_url:
+            user_url_values.update({raw_url, raw_url.rstrip("/"), raw_url.rstrip("/") + "/"})
+    async with session_scope() as db:
+        await db.execute(
+            WebMediaSource.__table__.update()
+            .where(WebMediaSource.polling_started_at < stale_before)
+            .values(polling_started_at=None)
+        )
+        await db.execute(
+            WebMediaEndpoint.__table__.update()
+            .where(WebMediaEndpoint.polling_started_at < stale_before)
+            .values(polling_started_at=None)
+        )
+        conditions = [
+            WebMediaSource.enabled.is_(True),
+            WebMediaEndpoint.enabled.is_(True),
+            WebMediaEndpoint.kind.in_(["rss", "atom"]),
+            (
+                WebMediaSource.next_poll_at.is_(None)
+                | (WebMediaSource.next_poll_at <= now)
+            ),
+            WebMediaSource.polling_started_at.is_(None),
+        ]
+        if not include_catalog:
+            if not user_url_values:
+                return []
+            conditions.append(WebMediaEndpoint.url.in_(user_url_values))
+        source_result = await db.execute(
+            select(WebMediaSource.id)
+            .join(WebMediaEndpoint, WebMediaEndpoint.source_id == WebMediaSource.id)
+            .where(*conditions)
+            .distinct()
+            .order_by(WebMediaSource.next_poll_at, WebMediaSource.id)
+            .limit(limit)
+        )
+        source_ids = [source_id for (source_id,) in source_result.all()]
+        if not source_ids:
+            return []
+        await db.execute(
+            WebMediaSource.__table__.update()
+            .where(WebMediaSource.id.in_(source_ids))
+            .values(polling_started_at=now)
+        )
+        endpoint_result = await db.execute(
+            select(WebMediaSource, WebMediaEndpoint)
+            .join(WebMediaEndpoint, WebMediaEndpoint.source_id == WebMediaSource.id)
+            .where(
+                WebMediaSource.id.in_(source_ids),
+                WebMediaSource.enabled.is_(True),
+                WebMediaEndpoint.enabled.is_(True),
+                WebMediaEndpoint.kind.in_(["rss", "atom"]),
+            )
+            .order_by(WebMediaSource.id, WebMediaEndpoint.id)
+        )
+        pairs = []
+        for source, endpoint in endpoint_result.all():
+            endpoint.polling_started_at = now
+            pairs.append((source.name or source.domain, endpoint.url))
+        await db.commit()
+        return pairs
+
+
 async def get_enabled_sitemap_endpoints() -> list[WebMediaEndpoint]:
     return await get_enabled_endpoints("sitemap")
+
+
+async def claim_due_endpoints(kind: str, *, limit: int) -> list[WebMediaEndpoint]:
+    """Claim due endpoints of one kind for a bounded polling batch."""
+
+    if limit <= 0:
+        return []
+    now = datetime.now(UTC)
+    stale_before = now - timedelta(minutes=15)
+    async with session_scope() as db:
+        await db.execute(
+            WebMediaSource.__table__.update()
+            .where(WebMediaSource.polling_started_at < stale_before)
+            .values(polling_started_at=None)
+        )
+        await db.execute(
+            WebMediaEndpoint.__table__.update()
+            .where(WebMediaEndpoint.polling_started_at < stale_before)
+            .values(polling_started_at=None)
+        )
+        result = await db.execute(
+            select(WebMediaSource.id)
+            .join(WebMediaEndpoint, WebMediaEndpoint.source_id == WebMediaSource.id)
+            .where(
+                WebMediaSource.enabled.is_(True),
+                WebMediaEndpoint.enabled.is_(True),
+                WebMediaEndpoint.kind == kind,
+                (
+                    WebMediaSource.next_poll_at.is_(None)
+                    | (WebMediaSource.next_poll_at <= now)
+                ),
+                WebMediaSource.polling_started_at.is_(None),
+            )
+            .distinct()
+            .order_by(WebMediaSource.next_poll_at, WebMediaSource.id)
+            .limit(limit)
+        )
+        source_ids = [source_id for (source_id,) in result.all()]
+        if not source_ids:
+            return []
+        await db.execute(
+            WebMediaSource.__table__.update()
+            .where(WebMediaSource.id.in_(source_ids))
+            .values(polling_started_at=now)
+        )
+        endpoint_result = await db.execute(
+            select(WebMediaEndpoint)
+            .join(WebMediaSource, WebMediaSource.id == WebMediaEndpoint.source_id)
+            .where(
+                WebMediaSource.id.in_(source_ids),
+                WebMediaSource.enabled.is_(True),
+                WebMediaEndpoint.enabled.is_(True),
+                WebMediaEndpoint.kind == kind,
+            )
+            .order_by(WebMediaEndpoint.id)
+        )
+        endpoints = list(endpoint_result.scalars().all())
+        for endpoint in endpoints:
+            endpoint.polling_started_at = now
+        await db.commit()
+        for endpoint in endpoints:
+            db.expunge(endpoint)
+        return endpoints
 
 
 async def get_enabled_endpoints(kind: str) -> list[WebMediaEndpoint]:
@@ -395,8 +568,10 @@ async def set_source_enabled(source_id: int, enabled: bool, *, by_user: bool = T
         source.enabled = enabled
         if not enabled:
             source.status = "disabled"
+            source.polling_started_at = None
         elif source.status == "disabled":
             source.status = "unknown"
+            source.next_poll_at = datetime.now(UTC)
         if by_user:
             source.managed_by_user = True
         await db.commit()
@@ -419,8 +594,10 @@ async def set_source_enabled_by_domain(
         source.enabled = enabled
         if not enabled:
             source.status = "disabled"
+            source.polling_started_at = None
         elif source.status == "disabled":
             source.status = "unknown"
+            source.next_poll_at = datetime.now(UTC)
         if by_user:
             source.managed_by_user = True
         await db.commit()
@@ -492,11 +669,21 @@ async def save_endpoint_check(
         if content_hash is not None:
             endpoint.content_hash = content_hash
         if source is not None:
-            source.status = status
+            if source.enabled:
+                source.status = status
             source.last_checked_at = now
+            source.last_polled_at = now
+            source.polling_started_at = None
             source.error = (error or "")[:2000] or None
             if status == "ok":
                 source.last_success_at = now
+                source.failure_count = 0
+            else:
+                source.failure_count += 1
+            backoff = min(8, 2 ** min(source.failure_count, 3))
+            source.next_poll_at = now + timedelta(
+                seconds=max(30, source.poll_interval_seconds * backoff)
+            )
             db.add(
                 WebMediaSourceCheck(
                     source_id=source.id,
@@ -541,6 +728,7 @@ async def save_endpoint_statuses(
             error = payload.get("error") or None
             endpoint.status = status
             endpoint.last_checked_at = now
+            endpoint.polling_started_at = None
             endpoint.error = error[:2000] if error else None
             source_states.setdefault(endpoint.source_id, []).append((status, error))
             source = sources.get(endpoint.source_id)
@@ -562,11 +750,21 @@ async def save_endpoint_statuses(
             if source is None:
                 continue
             successful = any(status == "ok" for status, _ in states)
-            source.status = "ok" if successful else "error"
+            if source.enabled:
+                source.status = "ok" if successful else "error"
             source.last_checked_at = now
+            source.last_polled_at = now
+            source.polling_started_at = None
             source.error = None if successful else "; ".join(error or "" for _, error in states)
             if successful:
                 source.last_success_at = now
+                source.failure_count = 0
+            else:
+                source.failure_count += 1
+            backoff = min(8, 2 ** min(source.failure_count, 3))
+            source.next_poll_at = now + timedelta(
+                seconds=max(30, source.poll_interval_seconds * backoff)
+            )
         await db.commit()
 
 
@@ -722,6 +920,24 @@ async def registry_summary() -> dict[str, int]:
             )
             or 0
         )
+        candidate_counts = {
+            f"candidate_{candidate_status}": int(
+                await db.scalar(
+                    select(func.count(WebMediaCandidate.id)).where(
+                        WebMediaCandidate.status == candidate_status
+                    )
+                )
+                or 0
+            )
+            for candidate_status in (
+                "pending",
+                "checking",
+                "approved",
+                "pending_review",
+                "temporary_error",
+                "rejected",
+            )
+        }
         return {
             "total": total,
             "working": int(
@@ -762,6 +978,7 @@ async def registry_summary() -> dict[str, int]:
             "rss": rss,
             "sitemaps": sitemaps,
             "aggregators": aggregators,
+            **candidate_counts,
             **{f"category_{key}": value for key, value in categories.items()},
         }
 

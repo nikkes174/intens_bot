@@ -1,7 +1,10 @@
 import httpx
 
-from app.services.web_monitor.rss_discovery import discover_feeds
-from app.services.web_monitor.source_discovery import parse_sitemap_xml
+from app.services.web_monitor.rss_discovery import PublicDocument, discover_feeds
+from app.services.web_monitor.source_discovery import (
+    crawl_sitemap_tree,
+    parse_sitemap_xml,
+)
 
 
 def _feed_body() -> bytes:
@@ -57,3 +60,86 @@ def test_sitemap_index_and_google_news_sitemap_are_parsed():
     assert parsed_urlset.entries[0].url == "https://example.ru/news/1"
     assert parsed_urlset.entries[0].title == "Главная новость"
     assert parsed_urlset.entries[0].published_at is not None
+
+
+async def test_sitemap_tree_follows_nested_indexes_and_ignores_cycles():
+    index_url = "https://example.ru/sitemap.xml"
+    nested_url = "https://example.ru/nested.xml"
+    leaf_url = "https://example.ru/news.xml"
+    bodies = {
+        index_url: f"""<sitemapindex>
+          <sitemap><loc>{nested_url}</loc></sitemap>
+          <sitemap><loc>{index_url}</loc></sitemap>
+        </sitemapindex>""".encode(),
+        nested_url: f"""<sitemapindex>
+          <sitemap><loc>{leaf_url}</loc></sitemap>
+          <sitemap><loc>{nested_url}</loc></sitemap>
+        </sitemapindex>""".encode(),
+        leaf_url: b"""<urlset><url>
+          <loc>https://example.ru/news/1</loc>
+          <lastmod>2026-11-11T10:00:00+00:00</lastmod>
+        </url></urlset>""",
+    }
+    calls = []
+
+    async def fetcher(url):
+        calls.append(url)
+        content = bodies[url]
+        return (
+            PublicDocument(
+                url=url,
+                status_code=200,
+                content=content,
+                headers={},
+                content_hash="hash-" + url.rsplit("/", 1)[-1],
+            ),
+            True,
+        )
+
+    async with httpx.AsyncClient() as client:
+        tree = await crawl_sitemap_tree(
+            client,
+            index_url,
+            fetcher=fetcher,
+            max_depth=4,
+            max_documents=10,
+        )
+
+    assert calls == [index_url, nested_url, leaf_url]
+    assert [entry.url for entry in tree.entries] == ["https://example.ru/news/1"]
+    assert not tree.errors
+
+
+async def test_sitemap_tree_limits_documents_and_total_bytes():
+    urls = [f"https://example.ru/{index}.xml" for index in ("one", "two", "three")]
+
+    async def fetcher(url):
+        position = urls.index(url)
+        children = (
+            f"<sitemap><loc>{urls[position + 1]}</loc></sitemap>"
+            if position + 1 < len(urls)
+            else ""
+        )
+        content = f"<sitemapindex>{children}</sitemapindex>".encode()
+        return (
+            PublicDocument(
+                url=url,
+                status_code=200,
+                content=content,
+                headers={},
+                content_hash=url,
+            ),
+            True,
+        )
+
+    async with httpx.AsyncClient() as client:
+        tree = await crawl_sitemap_tree(
+            client,
+            urls[0],
+            fetcher=fetcher,
+            max_documents=1,
+            max_bytes=10_000,
+        )
+
+    assert len(tree.documents) == 1
+    assert any("лимит документов" in error for error in tree.errors)

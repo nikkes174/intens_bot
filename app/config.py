@@ -85,6 +85,15 @@ class Settings:
     web_source_max_sitemaps_per_domain: int = _env_int(
         "WEB_SOURCE_MAX_SITEMAPS_PER_DOMAIN", 20, 1
     )
+    web_source_max_sitemap_depth: int = _env_int(
+        "WEB_SOURCE_MAX_SITEMAP_DEPTH", 3, 1
+    )
+    web_source_max_sitemap_documents: int = _env_int(
+        "WEB_SOURCE_MAX_SITEMAP_DOCUMENTS", 20, 1
+    )
+    web_source_max_sitemap_bytes: int = _env_int(
+        "WEB_SOURCE_MAX_SITEMAP_BYTES", 52428800, 1024
+    )
 
 
 _settings = None
