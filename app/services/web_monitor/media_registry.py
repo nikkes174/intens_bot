@@ -142,6 +142,8 @@ async def _upsert_source(
         return source
 
     # Imports and migrations must not overwrite an administrator's choices.
+    source_methods = _decode_methods(source.discovery_methods)
+    source.discovery_methods = _encode_methods([*source_methods, *discovery_methods])
     if not source.managed_by_user:
         if name and not source.name:
             source.name = name.strip()[:255]
@@ -151,12 +153,11 @@ async def _upsert_source(
             source.category = _validate_category(category)
         if rss_url and not source.rss_url:
             source.rss_url = rss_url
-        source_methods = _decode_methods(source.discovery_methods)
-        source.discovery_methods = _encode_methods([*source_methods, *discovery_methods])
         if origin in {"env", "autodiscovery"}:
-            source.enabled = True
+            source.enabled = enabled
             source.status = status
-            source.next_poll_at = datetime.now(UTC)
+            if enabled:
+                source.next_poll_at = datetime.now(UTC)
     return source
 
 
@@ -659,6 +660,7 @@ async def save_endpoint_check(
         source = await db.get(WebMediaSource, endpoint.source_id)
         endpoint.status = status
         endpoint.last_checked_at = now
+        endpoint.polling_started_at = None
         endpoint.error = (error or "")[:2000] or None
         if status == "ok":
             endpoint.last_success_at = now
@@ -673,7 +675,6 @@ async def save_endpoint_check(
                 source.status = status
             source.last_checked_at = now
             source.last_polled_at = now
-            source.polling_started_at = None
             source.error = (error or "")[:2000] or None
             if status == "ok":
                 source.last_success_at = now
@@ -695,6 +696,47 @@ async def save_endpoint_check(
                     checked_at=now,
                 )
             )
+            active_leases = await db.scalar(
+                select(func.count(WebMediaEndpoint.id)).where(
+                    WebMediaEndpoint.source_id == source.id,
+                    WebMediaEndpoint.polling_started_at.is_not(None),
+                )
+            )
+            if not active_leases:
+                source.polling_started_at = None
+        await db.commit()
+
+
+async def save_sitemap_children(endpoint_id: int, urls: Iterable[str]) -> None:
+    """Persist the last parsed children of a sitemap index for HTTP 304s."""
+
+    normalized = list(dict.fromkeys(str(url).strip() for url in urls if str(url).strip()))
+    async with session_scope() as db:
+        endpoint = await db.get(WebMediaEndpoint, endpoint_id)
+        if endpoint is None:
+            return
+        endpoint.child_sitemap_urls = json.dumps(normalized, ensure_ascii=False)
+        await db.commit()
+
+
+async def release_endpoint_poll(endpoint_id: int) -> None:
+    """Release a persisted endpoint lease, including cancellation paths."""
+
+    async with session_scope() as db:
+        endpoint = await db.get(WebMediaEndpoint, endpoint_id)
+        if endpoint is None:
+            return
+        endpoint.polling_started_at = None
+        source = await db.get(WebMediaSource, endpoint.source_id)
+        if source is not None:
+            active_leases = await db.scalar(
+                select(func.count(WebMediaEndpoint.id)).where(
+                    WebMediaEndpoint.source_id == source.id,
+                    WebMediaEndpoint.polling_started_at.is_not(None),
+                )
+            )
+            if not active_leases:
+                source.polling_started_at = None
         await db.commit()
 
 
@@ -754,7 +796,6 @@ async def save_endpoint_statuses(
                 source.status = "ok" if successful else "error"
             source.last_checked_at = now
             source.last_polled_at = now
-            source.polling_started_at = None
             source.error = None if successful else "; ".join(error or "" for _, error in states)
             if successful:
                 source.last_success_at = now
@@ -765,6 +806,14 @@ async def save_endpoint_statuses(
             source.next_poll_at = now + timedelta(
                 seconds=max(30, source.poll_interval_seconds * backoff)
             )
+            active_leases = await db.scalar(
+                select(func.count(WebMediaEndpoint.id)).where(
+                    WebMediaEndpoint.source_id == source.id,
+                    WebMediaEndpoint.polling_started_at.is_not(None),
+                )
+            )
+            if not active_leases:
+                source.polling_started_at = None
         await db.commit()
 
 

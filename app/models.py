@@ -301,6 +301,9 @@ class WebMediaEndpoint(Base):
     polling_started_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    child_sitemap_urls: Mapped[str] = mapped_column(
+        Text, nullable=False, default="[]"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

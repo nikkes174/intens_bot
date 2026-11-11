@@ -126,13 +126,6 @@ async def fetch_public_document(
             follow_redirects=False,
             timeout=timeout,
         ) as response:
-            if 300 <= response.status_code < 400:
-                location = response.headers.get("Location")
-                if not location:
-                    raise ValueError("Редирект без Location")
-                initial_scheme = parts.scheme.casefold()
-                current_url = urljoin(current_url, location)
-                continue
             if response.status_code == 304:
                 return PublicDocument(
                     url=current_url,
@@ -141,6 +134,13 @@ async def fetch_public_document(
                     headers=dict(response.headers),
                     content_hash="",
                 )
+            if 300 <= response.status_code < 400:
+                location = response.headers.get("Location")
+                if not location:
+                    raise ValueError("Редирект без Location")
+                initial_scheme = parts.scheme.casefold()
+                current_url = urljoin(current_url, location)
+                continue
             if response.status_code >= 400:
                 raise httpx.HTTPStatusError(
                     f"Source returned HTTP {response.status_code}",

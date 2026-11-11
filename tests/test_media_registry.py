@@ -6,6 +6,7 @@ from app.database import session_scope
 from app.models import WebMediaCandidate, WebMediaEndpoint, WebMediaSource
 from app.services.web_monitor.media_registry import (
     bulk_import_sources,
+    claim_due_endpoints,
     claim_due_feed_definitions,
     get_enabled_feed_definitions,
     normalize_domain,
@@ -241,6 +242,7 @@ async def test_manual_disable_is_preserved_when_import_check_succeeds(monkeypatc
         )
     assert source.enabled is False
     assert source.managed_by_user is True
+    assert '"rss"' in source.discovery_methods
 
 
 async def test_sources_are_claimed_independently_and_backoff_is_persisted():
@@ -295,3 +297,38 @@ async def test_sources_are_claimed_independently_and_backoff_is_persisted():
             select(WebMediaSource).where(WebMediaSource.domain == "second.example")
         )
     assert source.status == "disabled"
+
+
+async def test_stale_endpoint_claim_is_recovered_after_restart():
+    source = await upsert_source(
+        name="Restart sitemap",
+        domain="restart-sitemap.example",
+        enabled=True,
+    )
+    endpoint = await upsert_endpoint(
+        source.id,
+        "https://restart-sitemap.example/sitemap.xml",
+        kind="sitemap",
+    )
+    stale_at = datetime.now(UTC) - timedelta(minutes=16)
+    async with session_scope() as db:
+        source_row = await db.get(WebMediaSource, source.id)
+        endpoint_row = await db.get(WebMediaEndpoint, endpoint.id)
+        source_row.polling_started_at = stale_at
+        endpoint_row.polling_started_at = stale_at
+        source_row.next_poll_at = datetime.now(UTC)
+        await db.commit()
+
+        await db.execute(
+            WebMediaSource.__table__.update()
+            .where(WebMediaSource.id != source.id)
+            .values(next_poll_at=datetime.now(UTC) + timedelta(hours=1))
+        )
+        await db.commit()
+
+    claimed = await claim_due_endpoints("sitemap", limit=1)
+
+    assert [item.id for item in claimed] == [endpoint.id]
+    async with session_scope() as db:
+        endpoint_row = await db.get(WebMediaEndpoint, endpoint.id)
+    assert endpoint_row.polling_started_at is not None

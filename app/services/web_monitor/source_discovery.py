@@ -48,6 +48,15 @@ class SitemapDocument:
 
 
 @dataclass(frozen=True)
+class SitemapFetchResult:
+    """A sitemap response and an optional parse cached for unchanged content."""
+
+    document: PublicDocument
+    changed: bool
+    cached_parse: SitemapParseResult | None = None
+
+
+@dataclass(frozen=True)
 class SitemapTreeResult:
     documents: tuple[SitemapDocument, ...] = ()
     entries: tuple[SitemapEntry, ...] = ()
@@ -184,7 +193,7 @@ async def crawl_sitemap_tree(
     client: httpx.AsyncClient,
     root_url: str,
     *,
-    fetcher: Callable[[str], Awaitable[tuple[PublicDocument, bool]]] | None = None,
+    fetcher: Callable[[str], Awaitable[SitemapFetchResult]] | None = None,
     max_depth: int | None = None,
     max_documents: int | None = None,
     max_bytes: int | None = None,
@@ -213,12 +222,21 @@ async def crawl_sitemap_tree(
             errors.append(f"{sitemap_url}: превышена глубина sitemap")
             continue
         try:
-            document, changed = await fetcher(sitemap_url)
+            fetched = await fetcher(sitemap_url)
+            if isinstance(fetched, SitemapFetchResult):
+                result = fetched
+            else:
+                # Keep the helper compatible with callers using the original
+                # (document, changed) callback contract.
+                document, changed = fetched
+                result = SitemapFetchResult(document=document, changed=changed)
+            document = result.document
+            changed = result.changed
             total_bytes += len(document.content)
             if total_bytes > max_bytes:
                 errors.append("Превышен общий лимит данных sitemap")
                 break
-            parsed = None
+            parsed = result.cached_parse
             if changed and document.status_code != 304:
                 try:
                     parsed = parse_sitemap_xml(document.content)
@@ -238,7 +256,8 @@ async def crawl_sitemap_tree(
             )
             if parsed is None:
                 continue
-            entries.extend(parsed.entries)
+            if changed:
+                entries.extend(parsed.entries)
             for child_url in parsed.sitemap_urls:
                 try:
                     canonical_child = _canonical_sitemap_url(child_url)
@@ -264,8 +283,11 @@ async def crawl_sitemap_tree(
 async def _fetch_sitemap_document(
     client: httpx.AsyncClient,
     url: str,
-) -> tuple[PublicDocument, bool]:
-    return await fetch_public_document(client, url), True
+) -> SitemapFetchResult:
+    return SitemapFetchResult(
+        document=await fetch_public_document(client, url),
+        changed=True,
+    )
 
 
 async def _fetch_robots_sitemaps(client: httpx.AsyncClient, origin: str) -> list[str]:

@@ -178,12 +178,18 @@ def _migrate_sqlite(sync_conn):
         )
     if "web_media_endpoints" in tables:
         columns = {col["name"] for col in inspector.get_columns("web_media_endpoints")}
-        if "polling_started_at" not in columns:
-            sync_conn.execute(
-                text(
-                    "ALTER TABLE web_media_endpoints ADD COLUMN polling_started_at DATETIME"
-                )
-            )
+        additions = {
+            "polling_started_at": (
+                "ALTER TABLE web_media_endpoints ADD COLUMN polling_started_at DATETIME"
+            ),
+            "child_sitemap_urls": (
+                "ALTER TABLE web_media_endpoints ADD COLUMN child_sitemap_urls "
+                "TEXT NOT NULL DEFAULT '[]'"
+            ),
+        }
+        for column, statement in additions.items():
+            if column not in columns:
+                sync_conn.execute(text(statement))
 
 
 async def close_database():

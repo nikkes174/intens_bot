@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import calendar
 import email.utils
+import json
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -17,11 +18,15 @@ import httpx
 from app.config import get_settings
 from app.services.web_monitor.media_registry import (
     claim_due_endpoints,
+    release_endpoint_poll,
     save_endpoint_check,
+    save_sitemap_children,
     upsert_endpoint,
 )
 from app.services.web_monitor.rss_discovery import fetch_public_document
 from app.services.web_monitor.source_discovery import (
+    SitemapFetchResult,
+    SitemapParseResult,
     crawl_sitemap_tree,
     extract_news_page_links,
 )
@@ -364,6 +369,8 @@ class SitemapProvider:
         self._url_locks: dict[str, asyncio.Lock] = {}
 
     async def _fetch_endpoint(self, endpoint) -> list[WebArticle]:
+        endpoint_ids = {endpoint.url: endpoint.id}
+
         async def fetch_document(url: str):
             lock = self._url_locks.setdefault(url, asyncio.Lock())
             async with lock:
@@ -375,6 +382,17 @@ class SitemapProvider:
                         kind="sitemap",
                         enabled=True,
                         discovered_by="sitemap_index",
+                    )
+                endpoint_ids[url] = cached_endpoint.id
+                cached_parse = None
+                try:
+                    child_urls = json.loads(cached_endpoint.child_sitemap_urls or "[]")
+                except (TypeError, ValueError):
+                    child_urls = []
+                if isinstance(child_urls, list) and child_urls:
+                    cached_parse = SitemapParseResult(
+                        kind="index",
+                        sitemap_urls=tuple(str(value) for value in child_urls),
                     )
                 headers = {}
                 if cached_endpoint.etag:
@@ -406,13 +424,29 @@ class SitemapProvider:
                     last_modified=document.headers.get("last-modified"),
                     content_hash=document.content_hash or cached_endpoint.content_hash,
                 )
-                return document, not unchanged
+                return SitemapFetchResult(
+                    document=document,
+                    changed=not unchanged,
+                    cached_parse=cached_parse,
+                )
 
         tree = await crawl_sitemap_tree(
             self.client,
             endpoint.url,
             fetcher=fetch_document,
         )
+        for document in tree.documents:
+            if not document.changed:
+                continue
+            parsed = document.parsed
+            child_urls = (
+                parsed.sitemap_urls
+                if parsed is not None and parsed.kind == "index"
+                else ()
+            )
+            endpoint_id = endpoint_ids.get(document.url)
+            if endpoint_id is not None:
+                await save_sitemap_children(endpoint_id, child_urls)
         domain = urlsplit(endpoint.url).hostname or "sitemap"
         articles = [
             WebArticle(
@@ -452,6 +486,10 @@ class SitemapProvider:
                     logger.warning("Sitemap %s failed: %s", endpoint.url, exc)
                     await save_endpoint_check(endpoint.id, status="error", error=str(exc))
                 finally:
+                    try:
+                        await asyncio.shield(release_endpoint_poll(endpoint.id))
+                    except Exception as exc:  # noqa: BLE001 - lease cleanup is best effort
+                        logger.error("Failed to release sitemap lease %s: %s", endpoint.url, exc)
                     queue.task_done()
 
         workers = [
