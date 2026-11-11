@@ -98,6 +98,8 @@ def _surname_case_forms(word: str) -> dict[str, str]:
         stem = word[:-4]
         values = (word, stem + "ской", stem + "ской", stem + "скую", stem + "ской", stem + "ской")
     elif word.endswith(("ский", "цкий")):
+        # Keep the ``ск``/``цк`` part of the surname stem and replace only
+        # the nominative ``ий`` ending: Петровский -> Петровского.
         stem = word[:-2]
         values = (word, stem + "ого", stem + "ому", stem + "ого", stem + "им", stem + "ом")
     elif word.endswith("ая"):

@@ -47,7 +47,9 @@ def _authorized(provider: str, body: bytes, headers) -> bool:
         expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
         if signature and hmac.compare_digest(signature, expected):
             return True
-    return False
+    signature = headers.get("X-Hub-Signature", "").removeprefix("sha1=")
+    expected_sha1 = hmac.new(secret.encode(), body, hashlib.sha1).hexdigest()
+    return bool(signature) and hmac.compare_digest(signature, expected_sha1)
 
 
 def _parse_datetime(value: Any) -> datetime | None:

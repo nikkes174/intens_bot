@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from app.admin.keyboards import (
     web_confirm_delete_keyboard,
     web_main_keyboard,
+    web_russian_sources_keyboard,
     web_watch_actions_keyboard,
     web_watches_keyboard,
 )
@@ -19,6 +20,10 @@ from app.database import session_scope
 from app.models import WebDetection, WebWatch
 from app.services.web_monitor.matcher import validate_watch_query
 from app.services.web_monitor.scheduler import get_web_monitor
+from app.services.web_monitor.russian_sources import (
+    get_source_overview,
+    set_source_enabled,
+)
 from app.services.web_monitor.storage import (
     find_watch_by_query,
     get_recent_articles,
@@ -285,6 +290,69 @@ async def web_sources(callback: CallbackQuery):
     await callback.answer()
 
 
+async def _show_russian_sources(target):
+    overview = await get_source_overview()
+    total = len(overview)
+    active = sum(
+        1
+        for item in overview
+        if item["enabled"]
+        and item["source"].rss_url
+        and item["status"] not in {"error", "unavailable"}
+    )
+    unavailable = sum(
+        1
+        for item in overview
+        if item["status"] in {"error", "unavailable"}
+    )
+    lines = [
+        "📰 Мониторинг российских СМИ",
+        "",
+        f"Источников: {total}",
+        f"Активных: {active}",
+        f"Недоступных: {unavailable}",
+        "",
+        "Нажмите на издание, чтобы включить или отключить его.",
+    ]
+    for item in overview:
+        source = item["source"]
+        if item["status"] == "ok":
+            status = "🟢"
+        elif item["status"] in {"error", "unavailable"}:
+            status = "🔴"
+        else:
+            status = "🟡"
+        if not item["enabled"]:
+            status = "⚪"
+        lines.append(f"{source.name} — {status}")
+    await target.edit_text("\n".join(lines), reply_markup=web_russian_sources_keyboard(overview))
+
+
+@router.callback_query(F.data == "web:russian_sources")
+async def web_russian_sources(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    await _show_russian_sources(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("web:ru_source:"))
+async def web_russian_source_toggle(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    domain = callback.data.rsplit(":", 1)[-1]
+    overview = await get_source_overview()
+    item = next((item for item in overview if item["source"].domain == domain), None)
+    if item is None:
+        await callback.answer("Источник не найден", show_alert=True)
+        return
+    await set_source_enabled(domain, not bool(item["enabled"]))
+    await _show_russian_sources(callback.message)
+    await callback.answer("Настройка сохранена")
+
+
 @router.callback_query(F.data == "web:settings")
 async def web_settings(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -309,4 +377,3 @@ async def web_settings(callback: CallbackQuery):
         ),
     )
     await callback.answer()
-

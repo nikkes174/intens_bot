@@ -35,6 +35,8 @@ TITLE_DEDUP_WINDOW = timedelta(hours=6)
 # it only on the next polling cycle.  Keep this allowance independent from the
 # scheduler interval so delayed indexing is not mistaken for an old article.
 WATCH_START_GRACE = timedelta(minutes=5)
+EXTRACTION_MAX_ATTEMPTS = 3
+EXTRACTION_RETRY_DELAYS = (60, 300)
 
 
 def normalize_url(url: str) -> str:
@@ -184,7 +186,9 @@ async def upsert_article(article: WebArticle) -> tuple[WebArticleRecord, bool]:
                 url_hash=digest,
                 source_name=(article.source_name or "").strip(),
                 description=(article.description or "").strip(),
+                full_text=(article.full_text or "").strip(),
                 published_at=_utc(article.published_at),
+                extraction_status="success" if article.full_text.strip() else "pending",
             )
             db.add(record)
         else:
@@ -197,6 +201,11 @@ async def upsert_article(article: WebArticle) -> tuple[WebArticleRecord, bool]:
                 record.description = article.description.strip()
             if not record.source_name and article.source_name:
                 record.source_name = article.source_name.strip()
+            if not record.full_text and article.full_text:
+                record.full_text = article.full_text.strip()
+                record.extraction_status = "success"
+                record.extraction_error = None
+                record.extraction_next_attempt_at = None
             if record.published_at is None:
                 record.published_at = _utc(article.published_at)
         await db.commit()
@@ -222,7 +231,12 @@ async def ingest_article(
         if not watch.enabled:
             continue
         match = find_web_match(
-            f"{article.title}\n{article.description}",
+            "\n".join(
+                filter(
+                    None,
+                    [article.title, article.description, article.full_text],
+                )
+            ),
             watch.query,
             watch.clarification,
         )
@@ -288,6 +302,67 @@ async def ingest_article(
                 delivery_ids.append(delivery.id)
         await db.commit()
     return IngestResult(record.id, tuple(detection_ids), tuple(delivery_ids), created_article)
+
+
+async def claim_article_extraction(article_id: int) -> bool:
+    """Claim one persisted article for extraction, with bounded retries."""
+
+    now = datetime.now(UTC)
+    async with session_scope() as db:
+        record = await db.get(WebArticleRecord, article_id)
+        if record is None or record.full_text:
+            return False
+        if record.extraction_attempts >= EXTRACTION_MAX_ATTEMPTS:
+            return False
+        next_attempt = _utc(record.extraction_next_attempt_at)
+        if next_attempt is not None and next_attempt > now:
+            return False
+        last_attempt = _utc(record.extraction_last_attempt_at)
+        if (
+            record.extraction_status == "processing"
+            and last_attempt is not None
+            and now - last_attempt < timedelta(minutes=5)
+        ):
+            return False
+        record.extraction_status = "processing"
+        record.extraction_attempts += 1
+        record.extraction_last_attempt_at = now
+        record.extraction_next_attempt_at = None
+        record.extraction_error = None
+        await db.commit()
+        return True
+
+
+async def finish_article_extraction(
+    article_id: int,
+    full_text: str | None,
+    error: str | None = None,
+) -> None:
+    """Persist extraction output without holding a network operation in a DB transaction."""
+
+    now = datetime.now(UTC)
+    text = (full_text or "").strip()
+    async with session_scope() as db:
+        record = await db.get(WebArticleRecord, article_id)
+        if record is None:
+            return
+        if text:
+            record.full_text = text
+            record.extraction_status = "success"
+            record.extraction_error = None
+            record.extraction_next_attempt_at = None
+        else:
+            attempts = int(record.extraction_attempts or 0)
+            if attempts >= EXTRACTION_MAX_ATTEMPTS:
+                record.extraction_status = "failed"
+                record.extraction_next_attempt_at = None
+            else:
+                record.extraction_status = "retry"
+                delay_index = min(attempts - 1, len(EXTRACTION_RETRY_DELAYS) - 1)
+                delay = EXTRACTION_RETRY_DELAYS[max(0, delay_index)]
+                record.extraction_next_attempt_at = now + timedelta(seconds=delay)
+            record.extraction_error = (error or "Пустой текст статьи")[:2000]
+        await db.commit()
 
 
 async def set_provider_initialized(watch_id: int, provider: str) -> None:

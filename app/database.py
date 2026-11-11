@@ -88,6 +88,31 @@ def _migrate_sqlite(sync_conn):
             )
         if "mention_id" not in columns:
             sync_conn.execute(text("ALTER TABLE detection_mentions ADD COLUMN mention_id INTEGER"))
+    if "web_article_records" in tables:
+        columns = {col["name"] for col in inspector.get_columns("web_article_records")}
+        additions = {
+            "full_text": "ALTER TABLE web_article_records ADD COLUMN full_text TEXT NOT NULL DEFAULT ''",
+            "extraction_status": (
+                "ALTER TABLE web_article_records ADD COLUMN extraction_status "
+                "VARCHAR(32) NOT NULL DEFAULT 'pending'"
+            ),
+            "extraction_attempts": (
+                "ALTER TABLE web_article_records ADD COLUMN extraction_attempts "
+                "INTEGER NOT NULL DEFAULT 0"
+            ),
+            "extraction_last_attempt_at": (
+                "ALTER TABLE web_article_records ADD COLUMN extraction_last_attempt_at DATETIME"
+            ),
+            "extraction_next_attempt_at": (
+                "ALTER TABLE web_article_records ADD COLUMN extraction_next_attempt_at DATETIME"
+            ),
+            "extraction_error": (
+                "ALTER TABLE web_article_records ADD COLUMN extraction_error TEXT"
+            ),
+        }
+        for column, statement in additions.items():
+            if column not in columns:
+                sync_conn.execute(text(statement))
 
 
 async def close_database():

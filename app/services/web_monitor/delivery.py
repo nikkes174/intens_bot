@@ -132,6 +132,7 @@ async def process_delivery(delivery_id: int) -> bool:
                 return False
             article, rows = grouped
             queries = [row[1].query for row in rows if row[1] is not None]
+            matched_texts = [row[0].matched_text for row in rows if row[0] is not None]
             bot = _bot
             if bot is None:
                 await _mark_failure(delivery_id, attempt, RuntimeError("Bot is not configured"))
@@ -155,6 +156,7 @@ async def process_delivery(delivery_id: int) -> bool:
                         None,
                     ),
                     timezone_name=get_settings().timezone,
+                    matched_texts=matched_texts,
                 )
                 await send_notification(
                     bot,

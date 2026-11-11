@@ -22,11 +22,36 @@ def web_main_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="➕ Добавить имя", callback_data="web:add")],
             [InlineKeyboardButton(text="📋 Список отслеживания", callback_data="web:watches")],
             [InlineKeyboardButton(text="📰 Найденные публикации", callback_data="web:articles")],
+            [InlineKeyboardButton(text="📰 Российские СМИ", callback_data="web:russian_sources")],
             [InlineKeyboardButton(text="📡 Источники", callback_data="web:sources")],
             [InlineKeyboardButton(text="⚙️ Настройки", callback_data="web:settings")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:main")],
         ]
     )
+
+
+def web_russian_sources_keyboard(items) -> InlineKeyboardMarkup:
+    rows = []
+    for item in items:
+        source = item["source"]
+        if not item["enabled"]:
+            status = "⚪"
+        elif item["status"] == "ok":
+            status = "🟢"
+        elif item["status"] in {"error", "unavailable"}:
+            status = "🔴"
+        else:
+            status = "🟡"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{status} {source.name}",
+                    callback_data=f"web:ru_source:{source.domain}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="web:list")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def web_watches_keyboard(items) -> InlineKeyboardMarkup:

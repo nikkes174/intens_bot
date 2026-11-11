@@ -44,12 +44,37 @@ def _safe_zone(name: str) -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
+def _article_snippet(article, needles: Iterable[str]) -> str | None:
+    full_text = str(getattr(article, "full_text", "") or "").strip()
+    if not full_text:
+        return None
+    folded = full_text.casefold()
+    position = -1
+    matched_length = 0
+    for needle in needles:
+        value = " ".join(str(needle or "").split()).strip().casefold()
+        if not value:
+            continue
+        position = folded.find(value)
+        if position >= 0:
+            matched_length = len(value)
+            break
+    if position < 0:
+        return full_text[:420]
+    start = max(0, position - 180)
+    end = min(len(full_text), position + matched_length + 240)
+    prefix = "…" if start else ""
+    suffix = "…" if end < len(full_text) else ""
+    return f"{prefix}{full_text[start:end].strip()}{suffix}"
+
+
 def format_web_notification(
     article: WebArticle,
     watch_queries: Iterable[str] | str,
     *,
     detected_at: datetime | None = None,
     timezone_name: str = "UTC",
+    matched_texts: Iterable[str] | None = None,
 ) -> str:
     """Render a Telegram-safe web notification, capped at 4096 characters."""
 
@@ -67,6 +92,8 @@ def format_web_notification(
         "source": _truncate_escaped(article.source_name or "Неизвестный источник", 255),
         "title": _truncate_escaped(article.title or "Без заголовка", 1200),
     }
+    snippet = _article_snippet(article, [*(matched_texts or ()), *watches.split(", ")])
+    body_label = "💬 <b>Фрагмент:</b>\n" if snippet else "📝 <b>Описание:</b>\n"
     prefix = (
         "🌐 <b>НОВОЕ УПОМИНАНИЕ В ИНТЕРНЕТЕ</b>\n\n"
         f"👤 Отслеживается: {safe_values['watches']}\n\n"
@@ -74,12 +101,12 @@ def format_web_notification(
         f"📅 Опубликовано: {published_text}\n\n"
         "📌 <b>Заголовок:</b>\n"
         f"{safe_values['title']}\n\n"
-        "📝 <b>Описание:</b>\n"
+        + body_label
     )
     suffix = f"\n\n🔎 Обнаружено: {detected_text}"
     available = MAX_MESSAGE_LENGTH - len(prefix) - len(suffix)
     description = _truncate_escaped(
-        article.description or "Описание отсутствует",
+        snippet or article.description or "Описание отсутствует",
         max(0, available),
     )
     result = prefix + description + suffix

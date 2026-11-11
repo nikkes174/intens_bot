@@ -54,6 +54,24 @@ class Settings:
         1,
         int(os.getenv("WEB_MONITOR_FRESHNESS_HOURS", "168") or 168),
     )
+    web_article_extraction_enabled: bool = os.getenv(
+        "WEB_ARTICLE_EXTRACTION_ENABLED", "true"
+    ).lower() in {"1", "true", "yes", "on"}
+    web_article_max_concurrency: int = max(
+        1,
+        int(os.getenv("WEB_ARTICLE_MAX_CONCURRENCY", "3") or 3),
+    )
+    web_article_timeout: int = max(
+        1,
+        int(os.getenv("WEB_ARTICLE_TIMEOUT", "10") or 10),
+    )
+    web_russian_media_enabled: bool = os.getenv(
+        "WEB_RUSSIAN_MEDIA_ENABLED", "true"
+    ).lower() in {"1", "true", "yes", "on"}
+    web_russian_media_interval: int = max(
+        60,
+        int(os.getenv("WEB_RUSSIAN_MEDIA_INTERVAL", "300") or 300),
+    )
     web_rss_urls: str = os.getenv("WEB_RSS_URLS", "")
     web_webhook_enabled: bool = os.getenv("WEB_WEBHOOK_ENABLED", "false").lower() in {
         "1",

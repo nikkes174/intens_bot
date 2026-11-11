@@ -33,6 +33,15 @@ def test_webhook_requires_configured_secret(monkeypatch):
     assert not _authorized("partner", body, {"X-Webhook-Token": "wrong"})
 
 
+def test_websub_accepts_standard_sha1_signature(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "web_webhook_secrets", "websub=secret")
+    body = b"<rss><channel /></rss>"
+    signature = hmac.new(b"secret", body, hashlib.sha1).hexdigest()
+    assert _authorized("websub", body, {"X-Hub-Signature": f"sha1={signature}"})
+    assert not _authorized("websub", body, {"X-Hub-Signature": "sha1=wrong"})
+
+
 def test_websub_parses_rss_xml():
     xml = """<rss><channel><item>
       <title>Иван Иванов выступил</title>

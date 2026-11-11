@@ -23,6 +23,7 @@ class WebArticle:
     source_name: str
     published_at: datetime | None
     description: str = ""
+    full_text: str = ""
 
 
 class ProviderHTTPError(RuntimeError):
@@ -204,11 +205,30 @@ class RSSProvider:
                 source_name, url = "RSS", feed
             if str(url).strip():
                 self.feeds.append((str(source_name).strip() or "RSS", str(url).strip()))
+        self._enabled_urls: set[str] | None = None
+        self.feed_status: dict[str, dict[str, str]] = {}
+
+    @staticmethod
+    def _feed_key(url: str) -> str:
+        return url.strip().rstrip("/").casefold()
+
+    def set_enabled_urls(self, urls: Iterable[str] | None) -> None:
+        self._enabled_urls = None if urls is None else {self._feed_key(url) for url in urls}
+
+    def _active_feeds(self) -> list[tuple[str, str]]:
+        if self._enabled_urls is None:
+            return list(self.feeds)
+        return [
+            (source_name, url)
+            for source_name, url in self.feeds
+            if self._feed_key(url) in self._enabled_urls
+        ]
 
     async def fetch(self, query: str = "") -> list[WebArticle]:
         articles: list[WebArticle] = []
         failed_urls: list[str] = []
-        for source_name, url in self.feeds:
+        active_feeds = self._active_feeds()
+        for source_name, url in active_feeds:
             try:
                 response = await _request(self.client, self.name, url)
                 parsed = feedparser.parse(response.content)
@@ -236,13 +256,15 @@ class RSSProvider:
                             ).strip(),
                         )
                     )
+                self.feed_status[url] = {"status": "ok", "error": ""}
             except Exception as exc:  # noqa: BLE001 - one broken feed must not stop the batch
                 failed_urls.append(url)
+                self.feed_status[url] = {"status": "error", "error": str(exc)}
                 logger.warning("RSS feed %s failed: %s", url, exc)
                 continue
-        if self.feeds and failed_urls and len(failed_urls) == len(self.feeds):
+        if active_feeds and failed_urls and len(failed_urls) == len(active_feeds):
             raise RSSProviderError(
-                f"All RSS feeds failed ({len(failed_urls)}/{len(self.feeds)})",
+                f"All RSS feeds failed ({len(failed_urls)}/{len(active_feeds)})",
                 failed_urls,
             )
         return articles
