@@ -10,6 +10,7 @@ from app.services.web_monitor.media_registry import (
     claim_due_feed_definitions,
     get_enabled_feed_definitions,
     normalize_domain,
+    release_endpoint_poll,
     save_endpoint_statuses,
     set_source_enabled,
     upsert_endpoint,
@@ -332,3 +333,44 @@ async def test_stale_endpoint_claim_is_recovered_after_restart():
     async with session_scope() as db:
         endpoint_row = await db.get(WebMediaEndpoint, endpoint.id)
     assert endpoint_row.polling_started_at is not None
+
+
+async def test_claim_due_endpoints_filters_urls_and_limits_one_source_batch():
+    source = await upsert_source(
+        name="Multiple RSS",
+        domain="multiple-rss.example",
+        enabled=True,
+    )
+    first = await upsert_endpoint(
+        source.id,
+        "https://multiple-rss.example/first.xml",
+        kind="rss",
+    )
+    second = await upsert_endpoint(
+        source.id,
+        "https://multiple-rss.example/second.xml",
+        kind="rss",
+    )
+
+    claimed = await claim_due_endpoints(
+        "rss",
+        limit=1,
+        urls=[second.url],
+    )
+
+    assert [endpoint.url for endpoint in claimed] == [second.url]
+    async with session_scope() as db:
+        first_row = await db.get(WebMediaEndpoint, first.id)
+        second_row = await db.get(WebMediaEndpoint, second.id)
+        source_row = await db.get(WebMediaSource, source.id)
+    assert first_row.polling_started_at is None
+    assert second_row.polling_started_at is not None
+    assert source_row.polling_started_at is not None
+
+    await release_endpoint_poll(second.id)
+    claimed_again = await claim_due_endpoints(
+        "rss",
+        limit=1,
+        urls=[first.url],
+    )
+    assert [endpoint.url for endpoint in claimed_again] == [first.url]

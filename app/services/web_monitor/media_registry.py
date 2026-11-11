@@ -533,23 +533,30 @@ async def claim_due_endpoints(
         source_ids = [source_id for (source_id,) in result.all()]
         if not source_ids:
             return []
-        await db.execute(
-            WebMediaSource.__table__.update()
-            .where(WebMediaSource.id.in_(source_ids))
-            .values(polling_started_at=now)
-        )
+        endpoint_conditions = [
+            WebMediaSource.id.in_(source_ids),
+            WebMediaSource.enabled.is_(True),
+            WebMediaEndpoint.enabled.is_(True),
+            WebMediaEndpoint.kind == kind,
+        ]
+        if allowed_urls:
+            endpoint_conditions.append(WebMediaEndpoint.url.in_(allowed_urls))
         endpoint_result = await db.execute(
             select(WebMediaEndpoint)
             .join(WebMediaSource, WebMediaSource.id == WebMediaEndpoint.source_id)
-            .where(
-                WebMediaSource.id.in_(source_ids),
-                WebMediaSource.enabled.is_(True),
-                WebMediaEndpoint.enabled.is_(True),
-                WebMediaEndpoint.kind == kind,
-            )
+            .where(*endpoint_conditions)
             .order_by(WebMediaEndpoint.id)
+            .limit(limit)
         )
         endpoints = list(endpoint_result.scalars().all())
+        selected_source_ids = {endpoint.source_id for endpoint in endpoints}
+        if not selected_source_ids:
+            return []
+        await db.execute(
+            WebMediaSource.__table__.update()
+            .where(WebMediaSource.id.in_(selected_source_ids))
+            .values(polling_started_at=now)
+        )
         for endpoint in endpoints:
             endpoint.polling_started_at = now
         await db.commit()
