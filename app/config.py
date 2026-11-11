@@ -20,10 +20,19 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).lower() in {"1", "true", "yes", "on"}
 
 
+def parse_admin_ids(value: str) -> tuple[int, ...]:
+    result = []
+    for item in value.split(","):
+        item = item.strip()
+        if item.isdigit() and int(item) > 0:
+            result.append(int(item))
+    return tuple(dict.fromkeys(result))
+
+
 @dataclass
 class Settings:
     bot_token: str = os.getenv("BOT_TOKEN", "")
-    admin_id: int = _env_int("ADMIN_ID", 0)
+    admin_ids: tuple[int, ...] = parse_admin_ids(os.getenv("ADMIN_ID", ""))
     api_id: int = _env_int("API_ID", 0)
     api_hash: str = os.getenv("API_HASH", "")
     database_url: str = os.getenv(
@@ -95,6 +104,16 @@ class Settings:
         "WEB_SOURCE_MAX_SITEMAP_BYTES", 52428800, 1024
     )
 
+    @property
+    def admin_id(self) -> int:
+        """Return the first administrator for backwards compatibility."""
+
+        return self.admin_ids[0] if self.admin_ids else 0
+
+    @admin_id.setter
+    def admin_id(self, value: int) -> None:
+        self.admin_ids = (value,) if value > 0 else ()
+
 
 _settings = None
 
@@ -108,4 +127,4 @@ def get_settings() -> Settings:
 
 def is_admin(user_id: int) -> bool:
     settings = get_settings()
-    return settings.admin_id != 0 and user_id == settings.admin_id
+    return user_id in settings.admin_ids

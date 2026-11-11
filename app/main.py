@@ -76,10 +76,10 @@ async def main() -> None:
     source_service.set_client(client)
     configure(
         bot=bot,
-        admin_id=settings.admin_id,
+        admin_ids=settings.admin_ids,
         client=client,
     )
-    configure_web_delivery(bot=bot, admin_id=settings.admin_id)
+    configure_web_delivery(bot=bot, admin_ids=settings.admin_ids)
 
     register_handlers(client, process_message)
 

@@ -25,15 +25,21 @@ _queued_ids: set[int] = set()
 _delivery_locks: dict[int, asyncio.Lock] = {}
 _article_locks: dict[int, asyncio.Lock] = {}
 _bot = None
-_admin_id: int | None = None
+_admin_ids: tuple[int, ...] | None = None
 
 
-def configure(bot=None, admin_id: int | None = None) -> None:
-    global _bot, _admin_id
+def configure(
+    bot=None,
+    admin_id: int | None = None,
+    admin_ids: tuple[int, ...] | None = None,
+) -> None:
+    global _bot, _admin_ids
     if bot is not None:
         _bot = bot
-    if admin_id is not None:
-        _admin_id = admin_id
+    if admin_ids is None and admin_id is not None:
+        admin_ids = (admin_id,)
+    if admin_ids is not None:
+        _admin_ids = tuple(dict.fromkeys(item for item in admin_ids if item > 0))
 
 
 def get_queue() -> asyncio.Queue[int]:

@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select
 
+from app.config import get_settings
 from app.database import session_scope
 from app.models import WebArticleRecord, WebDelivery, WebDetection, WebWatch
 from app.services.web_monitor.providers import WebArticle
@@ -132,6 +133,38 @@ async def test_new_watch_notifies_for_new_publication():
     result = await ingest_article(article, notify_watch_ids=[watch_id], admin_id=1)
 
     assert len(result.delivery_ids) == 1
+
+
+@pytest.mark.asyncio
+async def test_new_web_detection_creates_one_delivery_per_unique_admin(monkeypatch):
+    monkeypatch.setattr(get_settings(), "admin_ids", (101, 202, 101))
+    watch_started_at = datetime.now(UTC)
+    async with session_scope() as db:
+        watch = WebWatch(
+            query="иван иванов",
+            enabled=True,
+            created_at=watch_started_at,
+        )
+        db.add(watch)
+        await db.commit()
+        await db.refresh(watch)
+        watch_id = watch.id
+
+    article = WebArticle(
+        provider="rss",
+        title="Иван Иванов выступил для двух администраторов",
+        url="https://news.example/multiple-admins",
+        source_name="Example",
+        published_at=watch_started_at + timedelta(seconds=1),
+    )
+    first = await ingest_article(article, notify_watch_ids=[watch_id])
+    second = await ingest_article(article, notify_watch_ids=[watch_id])
+
+    assert len(first.delivery_ids) == 2
+    assert second.delivery_ids == ()
+    async with session_scope() as db:
+        deliveries = list((await db.execute(select(WebDelivery))).scalars().all())
+    assert {delivery.admin_id for delivery in deliveries} == {101, 202}
 
 
 @pytest.mark.asyncio

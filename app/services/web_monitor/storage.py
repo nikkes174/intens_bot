@@ -453,7 +453,10 @@ async def ingest_article(
     record, created_article = await upsert_article(article)
     detection_ids: list[int] = []
     delivery_ids: list[int] = []
-    admin_id = get_settings().admin_id if admin_id is None else admin_id
+    configured_admin_ids = (
+        get_settings().admin_ids if admin_id is None else (admin_id,)
+    )
+    admin_ids = tuple(dict.fromkeys(item for item in configured_admin_ids if item > 0))
     published_at = _utc(record.published_at)
     first_seen_at = _utc(record.first_seen_at)
     article_time = published_at or first_seen_at
@@ -481,7 +484,7 @@ async def ingest_article(
             should_notify = (
                 is_new_detection
                 and watch.id in notify_ids
-                and admin_id
+                and admin_ids
                 and article_time is not None
                 and watch_started_at is not None
                 and article_time >= watch_started_at - WATCH_START_GRACE
@@ -490,22 +493,23 @@ async def ingest_article(
             # observation of the same detection.  This also prevents a
             # restart or enabling notifications from replaying old articles.
             if should_notify:
-                delivery_result = await db.execute(
-                    select(WebDelivery).where(
-                        WebDelivery.detection_id == detection.id,
-                        WebDelivery.admin_id == admin_id,
+                for target_admin_id in admin_ids:
+                    delivery_result = await db.execute(
+                        select(WebDelivery).where(
+                            WebDelivery.detection_id == detection.id,
+                            WebDelivery.admin_id == target_admin_id,
+                        )
                     )
-                )
-                delivery = delivery_result.scalar_one_or_none()
-                if delivery is None:
-                    delivery = WebDelivery(
-                        detection_id=detection.id,
-                        admin_id=admin_id,
-                        status="pending",
-                    )
-                    db.add(delivery)
-                    await db.flush()
-                delivery_ids.append(delivery.id)
+                    delivery = delivery_result.scalar_one_or_none()
+                    if delivery is None:
+                        delivery = WebDelivery(
+                            detection_id=detection.id,
+                            admin_id=target_admin_id,
+                            status="pending",
+                        )
+                        db.add(delivery)
+                        await db.flush()
+                    delivery_ids.append(delivery.id)
         await db.commit()
     return IngestResult(record.id, tuple(detection_ids), tuple(delivery_ids), created_article)
 

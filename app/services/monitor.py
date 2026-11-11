@@ -28,17 +28,30 @@ logger = logging.getLogger(__name__)
 
 _queue: asyncio.Queue[int] | None = None
 _bot = None
-_admin_id: Optional[int] = None
+_admin_ids: tuple[int, ...] | None = None
 _client = None
 _source_service = None
 
 
-def configure(bot=None, admin_id=None, client=None, settings=None, source_service=None):
-    global _bot, _admin_id, _client, _source_service
+def _normalize_admin_ids(values) -> tuple[int, ...]:
+    return tuple(dict.fromkeys(value for value in values if value > 0))
+
+
+def configure(
+    bot=None,
+    admin_id=None,
+    client=None,
+    settings=None,
+    source_service=None,
+    admin_ids=None,
+):
+    global _bot, _admin_ids, _client, _source_service
     if bot is not None:
         _bot = bot
-    if admin_id is not None:
-        _admin_id = admin_id
+    if admin_ids is None and admin_id is not None:
+        admin_ids = (admin_id,)
+    if admin_ids is not None:
+        _admin_ids = _normalize_admin_ids(admin_ids)
     if client is not None:
         _client = client
     if source_service is not None:
@@ -430,6 +443,19 @@ async def _flush_overflow() -> None:
     _flush_task = None
 
 
+async def _save_sent_admin_ids(
+    delivery_id: int,
+    payload: dict,
+    sent_admin_ids: set[int],
+) -> None:
+    payload["_sent_admin_ids"] = sorted(sent_admin_ids)
+    async with session_scope() as db:
+        delivery = await db.get(Delivery, delivery_id)
+        if delivery is not None:
+            delivery.payload = json.dumps(payload, ensure_ascii=False)
+            await db.commit()
+
+
 async def _process_delivery(delivery_id: int) -> None:
     settings = get_settings()
     lock = _get_delivery_lock(delivery_id)
@@ -505,13 +531,62 @@ async def _process_delivery(delivery_id: int) -> None:
             )
             keyboard = notification_keyboard(payload.get("url"), payload.get("source_id"))
 
-            admin_id = _admin_id
-            if admin_id is None:
-                admin_id = settings.admin_id
+            admin_ids = _admin_ids
+            if admin_ids is None:
+                admin_ids = settings.admin_ids
+            admin_ids = _normalize_admin_ids(admin_ids)
+            if _bot is None or not admin_ids:
+                raise RuntimeError("Bot or admin ids are not configured")
 
-            if _bot is None or admin_id is None or admin_id == 0:
-                raise RuntimeError("Bot or admin id is not configured")
-            await send_notification(_bot, admin_id, text, keyboard)
+            sent_admin_ids = {
+                int(value)
+                for value in payload.get("_sent_admin_ids", [])
+                if str(value).isdigit() and int(value) > 0
+            }
+            failures = []
+            for admin_id in admin_ids:
+                if admin_id in sent_admin_ids:
+                    continue
+                try:
+                    await send_notification(_bot, admin_id, text, keyboard)
+                except Exception as exc:  # noqa: BLE001
+                    failures.append((admin_id, exc))
+                    logger.warning(
+                        "Notification delivery %s failed for admin %s: %s",
+                        delivery_id,
+                        admin_id,
+                        exc,
+                    )
+                    continue
+                sent_admin_ids.add(admin_id)
+                await _save_sent_admin_ids(delivery_id, payload, sent_admin_ids)
+
+            if failures:
+                retry_after = None
+                for _, error in failures:
+                    if "RetryAfter" in type(error).__name__ or "FloodWait" in type(error).__name__:
+                        retry_after = getattr(error, "retry_after", None)
+                        if retry_after is None:
+                            retry_after = getattr(error, "seconds", 1)
+                        break
+                error_text = "; ".join(
+                    f"{admin_id}: {error}" for admin_id, error in failures
+                )
+                async with session_scope() as db:
+                    delivery = await db.get(Delivery, delivery_id)
+                    if delivery is not None:
+                        if attempt >= settings.max_attempts:
+                            delivery.status = "failed"
+                        else:
+                            delivery.status = "pending"
+                            delay = retry_after if retry_after else min(2**attempt, 30)
+                            delivery.next_retry_at = datetime.now(timezone.utc) + timedelta(
+                                seconds=delay
+                            )
+                        delivery.last_error = error_text
+                        delivery.processing_started_at = None
+                        await db.commit()
+                return
             async with session_scope() as db:
                 delivery = await db.get(Delivery, delivery_id)
                 if delivery is not None:
