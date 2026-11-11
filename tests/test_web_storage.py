@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -8,6 +8,7 @@ from app.database import session_scope
 from app.models import WebArticleRecord, WebDelivery, WebDetection, WebWatch
 from app.services.web_monitor.providers import WebArticle
 from app.services.web_monitor.storage import (
+    WATCH_START_GRACE,
     ingest_article,
     normalize_url,
     upsert_article,
@@ -73,6 +74,121 @@ async def test_existing_detection_does_not_create_delivery_after_restart():
     assert replay.delivery_ids == ()
     async with session_scope() as db:
         assert await db.scalar(select(func.count(WebDelivery.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_new_watch_does_not_notify_for_old_publication():
+    old_published_at = datetime.now(UTC) - timedelta(hours=1)
+    article = WebArticle(
+        provider="google_news",
+        title="Иван Иванов выступил",
+        url="https://news.example/old-for-new-watch",
+        source_name="Example",
+        published_at=old_published_at,
+    )
+    record, _ = await upsert_article(article)
+
+    async with session_scope() as db:
+        watch = WebWatch(
+            query="иван иванов",
+            enabled=True,
+            created_at=datetime.now(UTC),
+        )
+        db.add(watch)
+        await db.commit()
+        await db.refresh(watch)
+        watch_id = watch.id
+
+    result = await ingest_article(article, notify_watch_ids=[watch_id], admin_id=1)
+
+    assert result.detection_ids
+    assert result.delivery_ids == ()
+    async with session_scope() as db:
+        assert await db.get(WebArticleRecord, record.id) is not None
+        assert await db.scalar(select(func.count(WebDelivery.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_new_watch_notifies_for_new_publication():
+    watch_started_at = datetime.now(UTC)
+    async with session_scope() as db:
+        watch = WebWatch(
+            query="иван иванов",
+            enabled=True,
+            created_at=watch_started_at,
+        )
+        db.add(watch)
+        await db.commit()
+        await db.refresh(watch)
+        watch_id = watch.id
+
+    article = WebArticle(
+        provider="google_news",
+        title="Иван Иванов выступил",
+        url="https://news.example/new-for-watch",
+        source_name="Example",
+        published_at=watch_started_at + timedelta(seconds=1),
+    )
+    result = await ingest_article(article, notify_watch_ids=[watch_id], admin_id=1)
+
+    assert len(result.delivery_ids) == 1
+
+
+@pytest.mark.asyncio
+async def test_new_watch_allows_publication_from_previous_five_minutes():
+    watch_started_at = datetime.now(UTC)
+    async with session_scope() as db:
+        watch = WebWatch(
+            query="иван иванов",
+            enabled=True,
+            created_at=watch_started_at,
+        )
+        db.add(watch)
+        await db.commit()
+        await db.refresh(watch)
+        watch_id = watch.id
+
+    article = WebArticle(
+        provider="google_news",
+        title="Иван Иванов выступил незадолго до добавления",
+        url="https://news.example/grace-period",
+        source_name="Example",
+        published_at=watch_started_at - timedelta(minutes=3),
+    )
+    result = await ingest_article(article, notify_watch_ids=[watch_id], admin_id=1)
+
+    assert len(result.delivery_ids) == 1
+
+
+@pytest.mark.asyncio
+async def test_published_at_allows_delayed_detection_beyond_scheduler_window():
+    watch_started_at = datetime.now(UTC) - timedelta(minutes=10)
+    article = WebArticle(
+        provider="google_news",
+        title="Иван Иванов обнаружен с задержкой",
+        url="https://news.example/delayed-detection",
+        source_name="Example",
+        published_at=watch_started_at + timedelta(minutes=1),
+    )
+    record, _ = await upsert_article(article)
+    async with session_scope() as db:
+        db_record = await db.get(WebArticleRecord, record.id)
+        db_record.first_seen_at = datetime.now(UTC) - timedelta(minutes=10)
+        watch = WebWatch(
+            query="иван иванов",
+            enabled=True,
+            created_at=watch_started_at,
+        )
+        db.add(watch)
+        await db.commit()
+        await db.refresh(watch)
+        watch_id = watch.id
+
+    result = await ingest_article(article, notify_watch_ids=[watch_id], admin_id=1)
+
+    assert len(result.delivery_ids) == 1
+    assert datetime.now(UTC) - watch_started_at > timedelta(seconds=60)
+    assert WATCH_START_GRACE == timedelta(minutes=5)
 
 
 @pytest.mark.asyncio

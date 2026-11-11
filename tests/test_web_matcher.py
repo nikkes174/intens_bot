@@ -32,6 +32,76 @@ def test_male_and_female_forms_stay_aligned():
     assert matches_web_watch("Анной Ивановой сообщили", "Анна Иванова")
 
 
+def test_masculine_surname_cases():
+    variants = generate_name_variants("Иван Петровский")
+
+    assert "иван петровский" in variants
+    assert "ивана петровского" in variants
+    assert "ивану петровскому" in variants
+    assert "иваном петровским" in variants
+    assert "иване петровском" in variants
+    assert matches_web_watch("Иваном Петровским заинтересовались СМИ", "Иван Петровский")
+
+
+def test_common_male_and_female_names_have_aligned_cases():
+    expected = {
+        "Иван Иванов": {
+            "иван иванов",
+            "ивана иванова",
+            "ивану иванову",
+            "иваном ивановым",
+            "иване иванове",
+        },
+        "Сергей Сидоров": {
+            "сергей сидоров",
+            "сергея сидорова",
+            "сергею сидорову",
+            "сергеем сидоровым",
+            "сергее сидорове",
+        },
+        "Дмитрий Волков": {
+            "дмитрий волков",
+            "дмитрия волкова",
+            "дмитрию волкову",
+            "дмитрием волковым",
+            "дмитрии волкове",
+        },
+        "Анна Иванова": {
+            "анна иванова",
+            "анны ивановой",
+            "анне ивановой",
+            "анну иванову",
+            "анной ивановой",
+        },
+        "Мария Петровская": {
+            "мария петровская",
+            "марии петровской",
+            "марию петровскую",
+            "марией петровской",
+        },
+        "Алексей Кузнецов": {
+            "алексей кузнецов",
+            "алексея кузнецова",
+            "алексею кузнецову",
+            "алексеем кузнецовым",
+            "алексее кузнецове",
+        },
+    }
+    for query, forms in expected.items():
+        variants = set(generate_name_variants(query))
+        assert forms <= variants
+        for form in forms:
+            assert matches_web_watch(form, query)
+
+
+def test_name_case_forms_do_not_mix_first_name_and_surname_cases():
+    variants = generate_name_variants("Иван Петровский")
+
+    assert "иван петровского" not in variants
+    assert "ивана петровский" not in variants
+    assert "ивану петровским" not in variants
+
+
 def test_clarification_is_required_when_configured():
     assert find_web_match("Иван Иванов выступил в Москве", "Иван Иванов", "Москва")
     assert find_web_match("Иван Иванов выступил в Казани", "Иван Иванов", "Москва") is None

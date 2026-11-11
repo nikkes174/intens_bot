@@ -31,6 +31,10 @@ TRACKING_KEYS = {
     "_ga",
 }
 TITLE_DEDUP_WINDOW = timedelta(hours=6)
+# A feed may publish an item shortly before a user creates a watch and deliver
+# it only on the next polling cycle.  Keep this allowance independent from the
+# scheduler interval so delayed indexing is not mistaken for an old article.
+WATCH_START_GRACE = timedelta(minutes=5)
 
 
 def normalize_url(url: str) -> str:
@@ -230,13 +234,9 @@ async def ingest_article(
     detection_ids: list[int] = []
     delivery_ids: list[int] = []
     admin_id = get_settings().admin_id if admin_id is None else admin_id
-    first_seen_at = _utc(record.first_seen_at) or datetime.now(UTC)
-    observation_window = timedelta(
-        seconds=max(60, get_settings().web_monitor_interval * 2)
-    )
-    is_recent_article = created_article or (
-        datetime.now(UTC) - observation_window <= first_seen_at <= datetime.now(UTC)
-    )
+    published_at = _utc(record.published_at)
+    first_seen_at = _utc(record.first_seen_at)
+    article_time = published_at or first_seen_at
 
     async with session_scope() as db:
         for watch, match in matched_watches:
@@ -257,10 +257,19 @@ async def ingest_article(
                 db.add(detection)
                 await db.flush()
             detection_ids.append(detection.id)
+            watch_started_at = _utc(watch.created_at)
+            should_notify = (
+                is_new_detection
+                and watch.id in notify_ids
+                and admin_id
+                and article_time is not None
+                and watch_started_at is not None
+                and article_time >= watch_started_at - WATCH_START_GRACE
+            )
             # A delivery belongs to the first detection, not to every later
             # observation of the same detection.  This also prevents a
             # restart or enabling notifications from replaying old articles.
-            if is_new_detection and is_recent_article and watch.id in notify_ids and admin_id:
+            if should_notify:
                 delivery_result = await db.execute(
                     select(WebDelivery).where(
                         WebDelivery.detection_id == detection.id,

@@ -48,10 +48,27 @@ def _first_name_case_forms(word: str) -> dict[str, str]:
 
     if word.endswith(("й", "ь")):
         stem = word[:-1]
-        values = (word, stem + "я", stem + "ю", stem + "я", stem + "ем", stem + "е")
+        prepositional_ending = "и" if word.endswith("ий") else "е"
+        values = (
+            word,
+            stem + "я",
+            stem + "ю",
+            stem + "я",
+            stem + "ем",
+            stem + prepositional_ending,
+        )
     elif word.endswith("я"):
         stem = word[:-1]
-        values = (word, stem + "и", stem + "е", stem + "ю", stem + "ей", stem + "е")
+        soft_ya_ending = word.endswith("ия")
+        dative_ending = "и" if soft_ya_ending else "е"
+        values = (
+            word,
+            stem + "и",
+            stem + dative_ending,
+            stem + "ю",
+            stem + "ей",
+            stem + dative_ending,
+        )
     elif word.endswith("а"):
         stem = word[:-1]
         genitive_ending = "и" if word.endswith(("га", "ка", "ха")) else "ы"
