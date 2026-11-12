@@ -91,6 +91,15 @@ def _migrate_sqlite(sync_conn):
             )
         if "mention_id" not in columns:
             sync_conn.execute(text("ALTER TABLE detection_mentions ADD COLUMN mention_id INTEGER"))
+    if "web_watches" in tables:
+        columns = {col["name"] for col in inspector.get_columns("web_watches")}
+        if "watch_type" not in columns:
+            sync_conn.execute(
+                text(
+                    "ALTER TABLE web_watches ADD COLUMN watch_type "
+                    "VARCHAR(32) NOT NULL DEFAULT 'person'"
+                )
+            )
     if "web_article_records" in tables:
         columns = {col["name"] for col in inspector.get_columns("web_article_records")}
         additions = {

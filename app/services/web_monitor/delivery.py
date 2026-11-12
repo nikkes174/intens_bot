@@ -138,6 +138,11 @@ async def process_delivery(delivery_id: int) -> bool:
                 return False
             article, rows = grouped
             queries = [row[1].query for row in rows if row[1] is not None]
+            watch_types = [
+                row[1].watch_type
+                for row in rows
+                if row[1] is not None
+            ]
             matched_texts = [row[0].matched_text for row in rows if row[0] is not None]
             bot = _bot
             if bot is None:
@@ -163,6 +168,7 @@ async def process_delivery(delivery_id: int) -> bool:
                     ),
                     timezone_name=get_settings().timezone,
                     matched_texts=matched_texts,
+                    watch_types=watch_types,
                 )
                 await send_notification(
                     bot,

@@ -20,7 +20,13 @@ from app.models import (
     WebDetection,
     WebWatch,
 )
-from app.services.web_monitor.matcher import WebMatch, find_web_match, normalize_text
+from app.services.web_monitor.matcher import (
+    WebMatch,
+    find_web_match,
+    normalize_text,
+    normalize_watch_type,
+    validate_watch_query,
+)
 from app.services.web_monitor.providers import WebArticle
 
 TRACKING_KEYS = {
@@ -123,11 +129,21 @@ async def get_watch(watch_id: int) -> WebWatch | None:
         return watch
 
 
-async def create_watch(query: str, clarification: str | None = None) -> WebWatch:
-    normalized = normalize_text(query)
+async def create_watch(
+    query: str,
+    clarification: str | None = None,
+    watch_type: str = "person",
+) -> WebWatch:
+    normalized_type = normalize_watch_type(watch_type)
+    normalized = validate_watch_query(query, normalized_type)
     clarification_value = normalize_text(clarification) or None
     async with session_scope() as db:
-        watch = WebWatch(query=normalized, clarification=clarification_value, enabled=True)
+        watch = WebWatch(
+            query=normalized,
+            watch_type=normalized_type,
+            clarification=clarification_value,
+            enabled=True,
+        )
         db.add(watch)
         await db.commit()
         await db.refresh(watch)
@@ -135,14 +151,20 @@ async def create_watch(query: str, clarification: str | None = None) -> WebWatch
         return watch
 
 
-async def find_watch_by_query(query: str, clarification: str | None = None) -> WebWatch | None:
-    normalized = normalize_text(query)
+async def find_watch_by_query(
+    query: str,
+    clarification: str | None = None,
+    watch_type: str = "person",
+) -> WebWatch | None:
+    normalized_type = normalize_watch_type(watch_type)
+    normalized = validate_watch_query(query, normalized_type)
     clarification_value = normalize_text(clarification) or None
     async with session_scope() as db:
         result = await db.execute(
-            select(WebWatch).where(WebWatch.query == normalized).where(
-                WebWatch.clarification == clarification_value
-            )
+            select(WebWatch)
+            .where(WebWatch.query == normalized)
+            .where(WebWatch.watch_type == normalized_type)
+            .where(WebWatch.clarification == clarification_value)
         )
         watch = result.scalar_one_or_none()
         if watch is not None:
@@ -445,6 +467,7 @@ async def ingest_article(
             ),
             watch.query,
             watch.clarification,
+            getattr(watch, "watch_type", "person") or "person",
         )
         if match is not None:
             matched_watches.append((watch, match))

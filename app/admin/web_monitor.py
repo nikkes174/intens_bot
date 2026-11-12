@@ -17,12 +17,13 @@ from app.admin.keyboards import (
     web_registry_values_keyboard,
     web_russian_sources_keyboard,
     web_watch_actions_keyboard,
+    web_watch_type_keyboard,
     web_watches_keyboard,
 )
 from app.config import get_settings, is_admin
 from app.database import session_scope
 from app.models import WebDetection, WebWatch
-from app.services.web_monitor.matcher import validate_watch_query
+from app.services.web_monitor.matcher import normalize_watch_type, validate_watch_query
 from app.services.web_monitor.media_registry import (
     SOURCE_CATEGORIES,
     ensure_candidate,
@@ -63,6 +64,13 @@ class WebMonitorStates(StatesGroup):
     waiting_for_source_search = State()
 
 
+WATCH_TYPE_LABELS = {
+    "person": "👤 Человек",
+    "organization": "🏢 Организация / бренд",
+    "keyword": "🔎 Ключевое слово или фраза",
+}
+
+
 def _registry_status_label(source) -> str:
     if not source.enabled:
         return "⚪ Отключён"
@@ -75,8 +83,15 @@ def _registry_status_label(source) -> str:
     return "🟡 Не проверен"
 
 
-def _parse_watch_input(value: str) -> tuple[str, str | None]:
+def _parse_watch_input(
+    value: str,
+    watch_type: str = "person",
+) -> tuple[str, str | None]:
+    normalized_type = normalize_watch_type(watch_type)
     lines = [line.strip() for line in (value or "").splitlines() if line.strip()]
+    if normalized_type != "person":
+        query = " ".join(lines)
+        return validate_watch_query(query, normalized_type), None
     query = ""
     clarification = None
     for line in lines:
@@ -87,7 +102,23 @@ def _parse_watch_input(value: str) -> tuple[str, str | None]:
             clarification = line.split(":", 1)[1].strip() or None
         elif not query:
             query = line
-    return validate_watch_query(query), clarification
+    return validate_watch_query(query, normalized_type), clarification
+
+
+def _watch_type_label(watch_type: str | None) -> str:
+    return WATCH_TYPE_LABELS.get(watch_type or "person", WATCH_TYPE_LABELS["person"])
+
+
+def _watch_input_prompt(watch_type: str) -> str:
+    if watch_type == "person":
+        return (
+            "Введите имя и фамилию человека:\n\n"
+            "Например:\nИван Иванов\n\n"
+            "Необязательно можно добавить уточнение строкой:\nУточнение: Москва"
+        )
+    if watch_type == "organization":
+        return "Введите название организации или бренда.\n\nНапример:\nГазпром\nБанк России\nООО Ромашка"
+    return "Введите ключевое слово или точную фразу.\n\nНапример:\nWildberries\nизменение налогов"
 
 
 async def _render_main() -> tuple[str, object]:
@@ -100,7 +131,7 @@ async def _render_main() -> tuple[str, object]:
         "🌐 Мониторинг интернета\n\n"
         f"Статус: {status}\n"
         f"Интервал планировщика: {settings.web_monitor_interval} секунд\n\n"
-        f"Отслеживаемых запросов: {watch_count}\n"
+        f"Отслеживаемых целей: {watch_count}\n"
         f"Найдено публикаций: {article_count}\n"
         f"Последняя проверка: {last}"
     )
@@ -176,27 +207,56 @@ async def web_add(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
     await state.set_state(WebMonitorStates.waiting_for_watch)
+    await state.update_data(watch_type=None)
     await callback.message.edit_text(
-        "Введите имя и фамилию человека:\n\n"
-        "Например:\nИван Иванов\n\n"
-        "Необязательно можно добавить уточнение строкой:\nУточнение: Москва"
+        "Что отслеживать? Выберите тип цели:",
+        reply_markup=web_watch_type_keyboard(),
     )
     await callback.answer()
 
 
-async def _save_watch(message: Message, state: FSMContext, watch_id: int | None = None) -> None:
+@router.callback_query(F.data.startswith("web:add_type:"))
+async def web_watch_type_select(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    watch_type = callback.data.rsplit(":", 1)[-1]
     try:
-        query, clarification = _parse_watch_input(message.text or "")
+        normalized_type = normalize_watch_type(watch_type)
+    except ValueError:
+        await callback.answer("Неизвестный тип цели", show_alert=True)
+        return
+    await state.set_state(WebMonitorStates.waiting_for_watch)
+    await state.update_data(watch_type=normalized_type)
+    await callback.message.edit_text(_watch_input_prompt(normalized_type))
+    await callback.answer()
+
+
+async def _save_watch(message: Message, state: FSMContext, watch_id: int | None = None) -> None:
+    state_data = await state.get_data()
+    existing_watch = await get_watch(watch_id) if watch_id is not None else None
+    watch_type = state_data.get("watch_type") or (
+        getattr(existing_watch, "watch_type", None) if existing_watch is not None else "person"
+    )
+    try:
+        query, clarification = _parse_watch_input(message.text or "", watch_type)
     except ValueError as exc:
         await message.answer(str(exc))
         return
-    existing = await find_watch_by_query(query, clarification)
+    existing = await find_watch_by_query(query, clarification, watch_type)
     if existing is not None and existing.id != watch_id:
         await message.answer("Такой запрос уже отслеживается.")
         return
     async with session_scope() as db:
         if watch_id is None:
-            db.add(WebWatch(query=query, clarification=clarification, enabled=True))
+            db.add(
+                WebWatch(
+                    query=query,
+                    watch_type=watch_type,
+                    clarification=clarification,
+                    enabled=True,
+                )
+            )
         else:
             watch = await db.get(WebWatch, watch_id)
             if watch is None:
@@ -204,11 +264,13 @@ async def _save_watch(message: Message, state: FSMContext, watch_id: int | None 
                 await state.clear()
                 return
             watch.query = query
+            watch.watch_type = watch_type
             watch.clarification = clarification
         await db.commit()
     await state.clear()
     await message.answer(
-        f"✅ {'Добавлено' if watch_id is None else 'Изменено'}\n\n{query}"
+        f"✅ {'Добавлено' if watch_id is None else 'Изменено'}\n"
+        f"{_watch_type_label(watch_type)}\n\n{query}"
         + (f"\nУточнение: {clarification}" if clarification else "")
         + "\n\nМониторинг активен."
     )
@@ -251,11 +313,12 @@ async def web_watch_view(callback: CallbackQuery):
         return
     async with session_scope() as db:
         count = await db.scalar(select(func.count(WebDetection.id)).where(WebDetection.watch_id == watch.id)) or 0
+    watch_type = getattr(watch, "watch_type", "person") or "person"
     clarification = f"\nУточнение: {escape(watch.clarification)}" if watch.clarification else ""
     text = (
-        f"👤 {escape(watch.query)}{clarification}\n\n"
+        f"{_watch_type_label(watch_type)}: {escape(watch.query)}{clarification}\n\n"
         f"Статус: {'🟢 Активен' if watch.enabled else '🔴 Выключен'}\n"
-        f"Найдено публикаций: {count}"
+        f"Найдено упоминаний: {count}"
     )
     await callback.message.edit_text(text, reply_markup=web_watch_actions_keyboard(watch.id, watch.enabled))
     await callback.answer()
@@ -289,9 +352,13 @@ async def web_watch_edit(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Не найдено", show_alert=True)
         return
     await state.set_state(WebMonitorStates.waiting_for_edit)
-    await state.update_data(watch_id=watch_id)
+    await state.update_data(
+        watch_id=watch_id,
+        watch_type=getattr(watch, "watch_type", "person") or "person",
+    )
     await callback.message.edit_text(
-        f"Текущее значение: {watch.query}\nВведите новое имя и фамилию:"
+        f"Текущее значение: {watch.query}\n\n"
+        f"{_watch_input_prompt(getattr(watch, 'watch_type', 'person') or 'person')}"
     )
     await callback.answer()
 
@@ -689,7 +756,7 @@ async def web_registry_stats(callback: CallbackQuery):
         f"Только агрегаторы: {summary['aggregators']}\n"
         f"Публикаций за сутки: {statistics['publications_24h']}\n"
         f"Полных текстов обработано: {statistics['full_texts_24h']}\n"
-        f"Совпадений по ФИО: {statistics['matches_24h']}\n"
+        f"Найдено упоминаний: {statistics['matches_24h']}\n"
         f"Отправлено уведомлений: {statistics['sent_24h']}\n"
         f"Новых источников: {statistics['new_sources_24h']}\n\n"
         f"Средняя задержка обнаружения: "

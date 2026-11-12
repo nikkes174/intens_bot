@@ -19,7 +19,7 @@ def main_keyboard() -> InlineKeyboardMarkup:
 def web_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Добавить имя", callback_data="web:add")],
+            [InlineKeyboardButton(text="➕ Добавить цель", callback_data="web:add")],
             [InlineKeyboardButton(text="📋 Список отслеживания", callback_data="web:watches")],
             [InlineKeyboardButton(text="📰 Найденные публикации", callback_data="web:articles")],
             [InlineKeyboardButton(text="📰 Российские СМИ", callback_data="web:russian_sources")],
@@ -27,6 +27,27 @@ def web_main_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🌐 Источники интернета", callback_data="web:registry")],
             [InlineKeyboardButton(text="⚙️ Настройки", callback_data="web:settings")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:main")],
+        ]
+    )
+
+
+def web_watch_type_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👤 Человек", callback_data="web:add_type:person")],
+            [
+                InlineKeyboardButton(
+                    text="🏢 Организация / бренд",
+                    callback_data="web:add_type:organization",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔎 Ключевое слово или фраза",
+                    callback_data="web:add_type:keyword",
+                )
+            ],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="web:list")],
         ]
     )
 
@@ -141,15 +162,22 @@ def web_russian_sources_keyboard(items) -> InlineKeyboardMarkup:
 
 
 def web_watches_keyboard(items) -> InlineKeyboardMarkup:
+    type_icons = {"person": "👤", "organization": "🏢", "keyword": "🔎"}
     rows = []
     for item in items:
         status = "🟢" if item.enabled else "🔴"
+        target_icon = type_icons.get(getattr(item, "watch_type", "person"), "👤")
         rows.append(
-            [InlineKeyboardButton(text=f"{status} {item.query}", callback_data=f"web:watch:{item.id}")]
+            [
+                InlineKeyboardButton(
+                    text=f"{status} {target_icon} {item.query}",
+                    callback_data=f"web:watch:{item.id}",
+                )
+            ]
         )
     rows.extend(
         [
-            [InlineKeyboardButton(text="➕ Добавить имя", callback_data="web:add")],
+            [InlineKeyboardButton(text="➕ Добавить цель", callback_data="web:add")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="web:list")],
         ]
     )

@@ -150,6 +150,9 @@ class WebWatch(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     query: Mapped[str] = mapped_column(String(255), nullable=False)
+    watch_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="person", server_default="person"
+    )
     clarification: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(

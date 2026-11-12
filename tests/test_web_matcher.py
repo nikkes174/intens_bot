@@ -105,3 +105,39 @@ def test_name_case_forms_do_not_mix_first_name_and_surname_cases():
 def test_clarification_is_required_when_configured():
     assert find_web_match("Иван Иванов выступил в Москве", "Иван Иванов", "Москва")
     assert find_web_match("Иван Иванов выступил в Казани", "Иван Иванов", "Москва") is None
+
+
+def test_organization_watch_matches_exact_phrase_and_boundaries():
+    assert matches_web_watch(
+        "Газпром объявил о проекте", "Газпром", watch_type="organization"
+    )
+    assert matches_web_watch(
+        "Банк России изменил ставку", "Банк России", watch_type="organization"
+    )
+    assert not matches_web_watch(
+        "Газпромбанк объявил о проекте", "Газпром", watch_type="organization"
+    )
+    assert not matches_web_watch(
+        "России Банк сообщил о решении",
+        "Банк России",
+        watch_type="organization",
+    )
+
+
+def test_keyword_watch_matches_case_insensitive_exact_phrase():
+    assert matches_web_watch(
+        "Wildberries открыл новый склад", "wildberries", watch_type="keyword"
+    )
+    assert matches_web_watch(
+        "Обсуждалось изменение налогов в Госдуме",
+        "изменение налогов",
+        watch_type="keyword",
+    )
+    assert not matches_web_watch(
+        "Изменение налоговой системы", "изменение налогов", watch_type="keyword"
+    )
+
+
+def test_person_watch_keeps_full_name_requirement():
+    assert not matches_web_watch("Газпром выступил", "Газпром")
+    assert matches_web_watch("Ивана Иванова пригласили", "Иван Иванов")

@@ -10,6 +10,8 @@ from app.models import WebArticleRecord, WebDelivery, WebDetection, WebWatch
 from app.services.web_monitor.providers import WebArticle
 from app.services.web_monitor.storage import (
     WATCH_START_GRACE,
+    create_watch,
+    find_watch_by_query,
     ingest_article,
     normalize_url,
     upsert_article,
@@ -165,6 +167,33 @@ async def test_new_web_detection_creates_one_delivery_per_unique_admin(monkeypat
     async with session_scope() as db:
         deliveries = list((await db.execute(select(WebDelivery))).scalars().all())
     assert {delivery.admin_id for delivery in deliveries} == {101, 202}
+
+
+@pytest.mark.asyncio
+async def test_watch_types_are_stored_searched_and_old_records_default_to_person():
+    person = await create_watch("Иван Иванов", clarification="Москва")
+    organization = await create_watch("Газпром", watch_type="organization")
+    keyword = await create_watch("Банк России", watch_type="keyword")
+
+    assert person.watch_type == "person"
+    assert organization.watch_type == "organization"
+    assert keyword.watch_type == "keyword"
+    assert (
+        await find_watch_by_query(
+            "Иван Иванов",
+            clarification="Москва",
+            watch_type="person",
+        )
+    ).id == person.id
+    assert (await find_watch_by_query("Газпром", watch_type="organization")).id == organization.id
+    assert (await find_watch_by_query("Банк России", watch_type="keyword")).id == keyword.id
+
+    async with session_scope() as db:
+        old_record = WebWatch(query="Старый запрос", enabled=True)
+        db.add(old_record)
+        await db.commit()
+        await db.refresh(old_record)
+        assert old_record.watch_type == "person"
 
 
 @pytest.mark.asyncio

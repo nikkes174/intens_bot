@@ -75,12 +75,22 @@ def format_web_notification(
     detected_at: datetime | None = None,
     timezone_name: str = "UTC",
     matched_texts: Iterable[str] | None = None,
+    watch_types: Iterable[str] | None = None,
 ) -> str:
     """Render a Telegram-safe web notification, capped at 4096 characters."""
 
     if isinstance(watch_queries, str):
         watch_queries = [watch_queries]
-    watches = ", ".join(dict.fromkeys(str(item) for item in watch_queries if item)) or "—"
+    queries = [str(item) for item in watch_queries if item]
+    type_icons = {"person": "👤", "organization": "🏢", "keyword": "🔎"}
+    types = list(watch_types or ())
+    watch_values = [
+        f"{type_icons.get(types[index], '🔎')} {query}"
+        if index < len(types)
+        else query
+        for index, query in enumerate(queries)
+    ]
+    watches = ", ".join(dict.fromkeys(watch_values)) or "—"
     published = _as_utc(article.published_at)
     detected = _as_utc(detected_at) or datetime.now(UTC)
     zone = _safe_zone(timezone_name)
@@ -96,7 +106,7 @@ def format_web_notification(
     body_label = "💬 <b>Фрагмент:</b>\n" if snippet else "📝 <b>Описание:</b>\n"
     prefix = (
         "🌐 <b>НОВОЕ УПОМИНАНИЕ В ИНТЕРНЕТЕ</b>\n\n"
-        f"👤 Отслеживается: {safe_values['watches']}\n\n"
+        f"🔎 Цель мониторинга: {safe_values['watches']}\n\n"
         f"📰 Источник: {safe_values['source']}\n"
         f"📅 Опубликовано: {published_text}\n\n"
         "📌 <b>Заголовок:</b>\n"

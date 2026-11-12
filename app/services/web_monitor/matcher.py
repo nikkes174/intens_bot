@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-"""Deterministic matching for a person's full name in publication text.
+"""Deterministic matching for web-monitoring targets.
 
-This intentionally does not match either a first name or a surname by itself.
-The small inflection engine covers the common Russian personal-name patterns
-without adding a heavyweight NLP dependency to the bot.
+Person watches retain the full-name inflection engine and never match a first
+name or surname alone. Organization and keyword watches use an exact phrase
+match without adding a heavyweight NLP dependency to the bot.
 """
 
 import re
@@ -13,12 +13,20 @@ from dataclasses import dataclass
 
 _SPACE_RE = re.compile(r"\s+")
 _WORD_CHARS = r"\w"
+WATCH_TYPES = frozenset({"person", "organization", "keyword"})
 
 
 def normalize_text(value: str | None) -> str:
     value = unicodedata.normalize("NFKC", value or "")
     value = value.replace("\u00a0", " ")
     return _SPACE_RE.sub(" ", value).strip().casefold()
+
+
+def normalize_watch_type(watch_type: str | None) -> str:
+    value = (watch_type or "person").strip().casefold()
+    if value not in WATCH_TYPES:
+        raise ValueError("Неизвестный тип цели мониторинга")
+    return value
 
 
 def _phrase_pattern(phrase: str) -> re.Pattern[str]:
@@ -162,42 +170,66 @@ class WebMatch:
     matched_text: str
 
 
-def find_web_match(text: str | None, query: str, clarification: str | None = None) -> WebMatch | None:
-    """Find a full-name phrase and optional clarification in *text*."""
+def find_web_match(
+    text: str | None,
+    query: str,
+    clarification: str | None = None,
+    watch_type: str = "person",
+) -> WebMatch | None:
+    """Find a person, organization, or exact keyword phrase in *text*."""
 
+    normalized_type = normalize_watch_type(watch_type)
     normalized_text = normalize_text(text)
-    if not normalized_text or len(normalize_text(query).split()) < 2:
+    normalized_query = normalize_text(query)
+    if not normalized_text or not normalized_query:
+        return None
+    if normalized_type == "person" and len(normalized_query.split()) < 2:
         return None
 
-    for variant in generate_name_variants(query):
+    variants = (
+        generate_name_variants(normalized_query)
+        if normalized_type == "person"
+        else [normalized_query]
+    )
+    for variant in variants:
         match = _phrase_pattern(variant).search(normalized_text)
         if match is None:
             continue
         if clarification and not any(
             _phrase_pattern(form).search(normalized_text)
-            for form in _clarification_variants(clarification)
+            for form in _clarification_variants(clarification, normalized_type)
         ):
             continue
         return WebMatch(query=query, matched_text=match.group(0))
     return None
 
 
-def _clarification_variants(value: str) -> list[str]:
+def _clarification_variants(value: str, watch_type: str = "person") -> list[str]:
     normalized = normalize_text(value)
+    if normalize_watch_type(watch_type) != "person":
+        return [normalized] if normalized else []
     words = normalized.split()
     if len(words) == 1:
         return _first_name_forms(words[0])
     return [normalized]
 
 
-def matches_web_watch(text: str | None, query: str, clarification: str | None = None) -> bool:
-    return find_web_match(text, query, clarification) is not None
+def matches_web_watch(
+    text: str | None,
+    query: str,
+    clarification: str | None = None,
+    watch_type: str = "person",
+) -> bool:
+    return find_web_match(text, query, clarification, watch_type) is not None
 
 
-def validate_watch_query(query: str) -> str:
+def validate_watch_query(query: str, watch_type: str = "person") -> str:
+    normalized_type = normalize_watch_type(watch_type)
     normalized = normalize_text(query)
-    if len(normalized.split()) < 2:
+    if normalized_type == "person" and len(normalized.split()) < 2:
         raise ValueError("Укажите имя и фамилию, например: Иван Иванов")
+    if normalized_type in {"organization", "keyword"} and not normalized:
+        raise ValueError("Укажите организацию или ключевую фразу")
     if len(normalized) > 255:
         raise ValueError("Запрос слишком длинный")
     return normalized
