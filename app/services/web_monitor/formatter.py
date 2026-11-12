@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.services.web_monitor.providers import WebArticle
+from app.services.web_monitor.text import clean_article_text
 
 MAX_MESSAGE_LENGTH = 4096
 
@@ -45,7 +46,7 @@ def _safe_zone(name: str) -> ZoneInfo:
 
 
 def _article_snippet(article, needles: Iterable[str]) -> str | None:
-    full_text = str(getattr(article, "full_text", "") or "").strip()
+    full_text = clean_article_text(str(getattr(article, "full_text", "") or ""))
     if not full_text:
         return None
     folded = full_text.casefold()
@@ -99,8 +100,12 @@ def format_web_notification(
 
     safe_values = {
         "watches": _truncate_escaped(watches, 600),
-        "source": _truncate_escaped(article.source_name or "Неизвестный источник", 255),
-        "title": _truncate_escaped(article.title or "Без заголовка", 1200),
+        "source": _truncate_escaped(
+            clean_article_text(article.source_name) or "Неизвестный источник", 255
+        ),
+        "title": _truncate_escaped(
+            clean_article_text(article.title) or "Без заголовка", 1200
+        ),
     }
     snippet = _article_snippet(article, [*(matched_texts or ()), *watches.split(", ")])
     body_label = "💬 <b>Фрагмент:</b>\n" if snippet else "📝 <b>Описание:</b>\n"
@@ -116,7 +121,9 @@ def format_web_notification(
     suffix = f"\n\n🔎 Обнаружено: {detected_text}"
     available = MAX_MESSAGE_LENGTH - len(prefix) - len(suffix)
     description = _truncate_escaped(
-        snippet or article.description or "Описание отсутствует",
+        snippet
+        or clean_article_text(article.description)
+        or "Описание отсутствует",
         max(0, available),
     )
     result = prefix + description + suffix

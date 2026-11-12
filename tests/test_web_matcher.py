@@ -141,3 +141,19 @@ def test_keyword_watch_matches_case_insensitive_exact_phrase():
 def test_person_watch_keeps_full_name_requirement():
     assert not matches_web_watch("Газпром выступил", "Газпром")
     assert matches_web_watch("Ивана Иванова пригласили", "Иван Иванов")
+
+
+def test_matching_uses_cleaned_html_text_for_all_watch_types():
+    html = (
+        '<a href="https://example.test">'
+        "Банк России сообщил о решении"
+        "</a>"
+    )
+
+    assert matches_web_watch(html, "Банк России", watch_type="organization")
+    assert matches_web_watch(html, "решении", watch_type="keyword")
+    assert not matches_web_watch(
+        '<a href="https://example.test/Банк">России Банк</a>',
+        "Банк России",
+        watch_type="organization",
+    )

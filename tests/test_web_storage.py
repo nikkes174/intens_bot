@@ -28,6 +28,27 @@ def test_tracking_parameters_are_removed_but_identity_is_preserved():
 
 
 @pytest.mark.asyncio
+async def test_article_text_is_cleaned_before_persisting():
+    article = WebArticle(
+        provider="google_news",
+        title="<b>Лерчек попросила Владимира Путина</b>",
+        url="https://news.example/cleaned-description",
+        source_name="Sostav.ru",
+        published_at=datetime.now(UTC),
+        description=(
+            '<a href="https://example.test">о помиловании</a>&nbsp;'
+            "<font>Sostav.ru</font>"
+        ),
+    )
+
+    record, created = await upsert_article(article)
+
+    assert created is True
+    assert record.title == "Лерчек попросила Владимира Путина"
+    assert record.description == "о помиловании Sostav.ru"
+
+
+@pytest.mark.asyncio
 async def test_article_and_detection_are_deduplicated():
     async with session_scope() as db:
         watch = WebWatch(query="иван иванов", enabled=True)

@@ -11,13 +11,15 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
+from app.services.web_monitor.text import clean_article_text
+
 _SPACE_RE = re.compile(r"\s+")
 _WORD_CHARS = r"\w"
 WATCH_TYPES = frozenset({"person", "organization", "keyword"})
 
 
 def normalize_text(value: str | None) -> str:
-    value = unicodedata.normalize("NFKC", value or "")
+    value = unicodedata.normalize("NFKC", clean_article_text(value))
     value = value.replace("\u00a0", " ")
     return _SPACE_RE.sub(" ", value).strip().casefold()
 

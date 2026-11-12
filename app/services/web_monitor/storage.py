@@ -28,6 +28,7 @@ from app.services.web_monitor.matcher import (
     validate_watch_query,
 )
 from app.services.web_monitor.providers import WebArticle
+from app.services.web_monitor.text import clean_article_text
 
 TRACKING_KEYS = {
     "fbclid",
@@ -96,9 +97,11 @@ def _normalize_article_field(value: str | None) -> str:
 
 
 def _normalize_source(value: str | None) -> str:
-    source = _normalize_article_field(value)
-    source = re.sub(r"^https?://", "", source)
-    return source.removeprefix("www.").rstrip("/")
+    source = (value or "").strip()
+    source = re.sub(r"^https?://", "", source, flags=re.IGNORECASE)
+    source = clean_article_text(source)
+    source = re.sub(r"^https?://", "", source, flags=re.IGNORECASE)
+    return normalize_text(source.removeprefix("www.").rstrip("/"))
 
 
 @dataclass(frozen=True)
@@ -173,6 +176,9 @@ async def find_watch_by_query(
 
 
 async def upsert_article(article: WebArticle) -> tuple[WebArticleRecord, bool]:
+    cleaned_title = clean_article_text(article.title)
+    cleaned_description = clean_article_text(article.description)
+    cleaned_full_text = clean_article_text(article.full_text)
     canonical = normalize_url(article.url)
     parsed = urlsplit(canonical)
     if not canonical or parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -191,7 +197,7 @@ async def upsert_article(article: WebArticle) -> tuple[WebArticleRecord, bool]:
                     WebArticleRecord.published_at <= upper_bound,
                 )
             )
-            normalized_title = _normalize_article_field(article.title)
+            normalized_title = _normalize_article_field(cleaned_title)
             normalized_source = _normalize_source(article.source_name)
             for candidate in candidates_result.scalars().all():
                 if (
@@ -206,29 +212,29 @@ async def upsert_article(article: WebArticle) -> tuple[WebArticleRecord, bool]:
         if record is None:
             record = WebArticleRecord(
                 provider=article.provider,
-                title=(article.title or "").strip(),
+                title=cleaned_title,
                 url=article.url.strip(),
                 canonical_url=canonical,
                 url_hash=digest,
                 source_name=(article.source_name or "").strip(),
-                description=(article.description or "").strip(),
-                full_text=(article.full_text or "").strip(),
+                description=cleaned_description,
+                full_text=cleaned_full_text,
                 published_at=_utc(article.published_at),
-                extraction_status="success" if article.full_text.strip() else "pending",
+                extraction_status="success" if cleaned_full_text else "pending",
             )
             db.add(record)
         else:
             # Keep the first-seen timestamp and canonical identity.  Feeds may
             # enrich an item later, so fill missing metadata without replacing
             # the source that first discovered it.
-            if not record.title and article.title:
-                record.title = article.title.strip()
-            if not record.description and article.description:
-                record.description = article.description.strip()
+            if not record.title and cleaned_title:
+                record.title = cleaned_title
+            if not record.description and cleaned_description:
+                record.description = cleaned_description
             if not record.source_name and article.source_name:
                 record.source_name = article.source_name.strip()
-            if not record.full_text and article.full_text:
-                record.full_text = article.full_text.strip()
+            if not record.full_text and cleaned_full_text:
+                record.full_text = cleaned_full_text
                 record.extraction_status = "success"
                 record.extraction_error = None
                 record.extraction_next_attempt_at = None

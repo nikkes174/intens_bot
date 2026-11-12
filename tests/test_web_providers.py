@@ -18,6 +18,7 @@ from app.services.web_monitor.providers import (
     RSSProvider,
     RSSProviderError,
     SitemapProvider,
+    clean_article_text,
 )
 
 
@@ -37,6 +38,81 @@ async def test_google_news_rss_is_parsed_without_html_search():
     assert articles[0].title == "Иван Иванов выступил"
     assert articles[0].source_name == "Example"
     assert articles[0].published_at == datetime(2026, 11, 10, 10, tzinfo=UTC)
+
+
+def test_clean_article_text_removes_markup_and_decodes_entities():
+    value = (
+        '<a href="https://news.google.com/rss/articles/...">'
+        "Лерчек попросила Владимира Путина о помиловании"
+        '</a>&nbsp;<font color="#6f6f6f">Sostav.ru</font>'
+    )
+
+    assert clean_article_text(value) == (
+        "Лерчек попросила Владимира Путина о помиловании Sostav.ru"
+    )
+    assert "href=" not in clean_article_text(value)
+
+
+@pytest.mark.asyncio
+async def test_google_news_rss_cleans_title_and_description_without_changing_url():
+    body = """<?xml version='1.0'?><rss><channel><item>
+      <title>&lt;b&gt;Лерчек попросила Владимира Путина&lt;/b&gt;</title>
+      <link>https://news.google.com/rss/articles/123</link>
+      <description><![CDATA[<a href='https://example.test'>о помиловании</a>&nbsp;<font>Sostav.ru</font>]]></description>
+    </item></channel></rss>""".encode()
+
+    async def handler(request):
+        return httpx.Response(200, content=body, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        article = (await GoogleNewsRSSProvider(client).fetch("Лерчек"))[0]
+
+    assert article.url == "https://news.google.com/rss/articles/123"
+    assert article.title == "Лерчек попросила Владимира Путина"
+    assert article.description == "о помиловании Sostav.ru"
+    assert "<" not in article.description
+    assert "href=" not in article.description
+
+
+@pytest.mark.asyncio
+async def test_gdelt_and_direct_rss_clean_html_fields():
+    async def handler(request):
+        if request.url.host == "gdelt.test":
+            return httpx.Response(
+                200,
+                json={
+                    "articles": [
+                        {
+                            "title": "<b>Банк России</b>",
+                            "url": "https://gdelt.test/article",
+                            "snippet": "<a href='https://source.test'>сообщил</a>",
+                            "domain": "gdelt.test",
+                        }
+                    ]
+                },
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            content=(
+                "<rss><channel><item><title><i>Газпром</i></title>"
+                "<link>https://rss.test/article</link>"
+                "<description>&lt;b&gt;сообщил&lt;/b&gt;</description>"
+                "</item></channel></rss>"
+            ).encode(),
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        gdelt_provider = GDELTProvider(client, min_interval=30)
+        gdelt_provider.endpoint = "https://gdelt.test/doc"
+        gdelt_article = await gdelt_provider.fetch("Банк России")
+        rss_article = await RSSProvider(client, [("RSS", "https://rss.test/feed")]).fetch()
+
+    assert gdelt_article[0].title == "Банк России"
+    assert gdelt_article[0].description == "сообщил"
+    assert rss_article[0].title == "Газпром"
+    assert rss_article[0].description == "сообщил"
 
 
 @pytest.mark.asyncio

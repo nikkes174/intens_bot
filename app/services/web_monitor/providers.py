@@ -16,6 +16,7 @@ import feedparser
 import httpx
 
 from app.config import get_settings
+from app.services.web_monitor.text import clean_article_text
 from app.services.web_monitor.media_registry import (
     claim_due_endpoints,
     get_registered_endpoint_urls,
@@ -45,6 +46,12 @@ class WebArticle:
     published_at: datetime | None
     description: str = ""
     full_text: str = ""
+
+    def __post_init__(self) -> None:
+        # Normalize feed and webhook payloads at the common article boundary.
+        # The URL is deliberately left untouched.
+        object.__setattr__(self, "title", clean_article_text(self.title))
+        object.__setattr__(self, "description", clean_article_text(self.description))
 
 
 class ProviderHTTPError(RuntimeError):
