@@ -11,6 +11,7 @@ from app.admin.keyboards import (
     sources_keyboard,
     source_actions_keyboard,
     confirm_exclude_keyboard,
+    confirm_delete_source_keyboard,
     source_add_cancel_keyboard,
 )
 from app.config import is_admin
@@ -155,21 +156,38 @@ async def source_toggle(callback: CallbackQuery):
     await source_view(callback)
 
 
-@router.callback_query(F.data.startswith("source:exclude:"))
-async def source_exclude(callback: CallbackQuery):
+@router.callback_query(F.data.startswith("source:delete:"))
+async def source_delete_ask(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
     source_db_id = int(callback.data.rsplit(":", 1)[-1])
-    async with session_scope() as db:
-        source = await db.get(Source, source_db_id)
-        if source is None:
-            await callback.answer("Не найдено", show_alert=True)
-            return
-        new_state = not source.excluded
-        telegram_id = source.telegram_id
-    await source_service.set_source_excluded(telegram_id, new_state)
-    await callback.answer("Готово")
+    await callback.message.edit_text(
+        "Удалить канал из списка и базы данных?",
+        reply_markup=confirm_delete_source_keyboard(source_db_id),
+    )
+    await callback.answer("Подтвердите удаление", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("source:delete_confirm:"))
+async def source_delete_confirm(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    source_db_id = int(callback.data.rsplit(":", 1)[-1])
+    deleted_telegram_id = await source_service.delete_source(source_db_id)
+    if deleted_telegram_id is None:
+        await callback.answer("Не найдено", show_alert=True)
+        return
+    await callback.answer("Канал удалён")
+    await _show_sources(callback, 0, "")
+
+
+@router.callback_query(F.data.startswith("source:delete_cancel:"))
+async def source_delete_cancel(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
     await source_view(callback)
 
 

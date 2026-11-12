@@ -51,6 +51,7 @@ async def reset_db():
             "detections",
             "exclusions",
             "sources",
+            "removed_sources",
             "mentions",
             "settings",
         ):

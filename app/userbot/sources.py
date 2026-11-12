@@ -8,7 +8,7 @@ from typing import Optional, Any
 from sqlalchemy import select
 
 from app.database import session_scope
-from app.models import Exclusion, Source
+from app.models import Exclusion, RemovedSource, Source
 
 from telethon import errors as telethon_errors
 from telethon.tl.functions.channels import JoinChannelRequest
@@ -63,11 +63,11 @@ def source_post_url(source: Optional[Source], message_id: int) -> Optional[str]:
     return None
 
 
-async def ensure_source_from_event(event: Any) -> None:
+async def ensure_source_from_event(event: Any) -> bool:
     chat = getattr(event, "chat", None)
     source_id = getattr(event, "chat_id", None)
     if source_id is None:
-        return
+        return False
     title = getattr(chat, "title", None) or ""
     username = getattr(chat, "username", None)
     source_type = None
@@ -79,6 +79,11 @@ async def ensure_source_from_event(event: Any) -> None:
         source_type = "group"
 
     async with session_scope() as db:
+        removed_result = await db.execute(
+            select(RemovedSource).where(RemovedSource.telegram_id == source_id)
+        )
+        if removed_result.scalar_one_or_none() is not None:
+            return False
         result = await db.execute(select(Source).where(Source.telegram_id == source_id))
         source = result.scalar_one_or_none()
         if source is None:
@@ -98,6 +103,7 @@ async def ensure_source_from_event(event: Any) -> None:
             if source_type is not None:
                 source.source_type = source_type
         await db.commit()
+    return True
 
 
 async def get_source(source_id: int) -> Optional[Source]:
@@ -234,6 +240,26 @@ async def set_source_excluded(source_id: int, excluded: bool) -> None:
                 await db.delete(existing)
 
 
+async def delete_source(source_db_id: int) -> Optional[int]:
+    """Delete a source row and remember its Telegram ID as administrator-removed."""
+
+    telegram_id = None
+    async with session_scope() as db:
+        async with db.begin():
+            source = await db.get(Source, source_db_id)
+            if source is None:
+                return None
+            telegram_id = source.telegram_id
+            removed_result = await db.execute(
+                select(RemovedSource).where(RemovedSource.telegram_id == telegram_id)
+            )
+            if removed_result.scalar_one_or_none() is None:
+                db.add(RemovedSource(telegram_id=telegram_id))
+            await db.delete(source)
+    invalidate_source_cache(telegram_id)
+    return telegram_id
+
+
 async def is_excluded(source_id: int) -> bool:
     async with session_scope() as db:
         result = await db.execute(
@@ -361,6 +387,13 @@ async def ensure_source_from_entity(client, entity) -> Source:
             exclusion = exclusion_result.scalar_one_or_none()
             if exclusion is not None:
                 await db.delete(exclusion)
+
+            removed_result = await db.execute(
+                select(RemovedSource).where(RemovedSource.telegram_id == telegram_id)
+            )
+            removed = removed_result.scalar_one_or_none()
+            if removed is not None:
+                await db.delete(removed)
 
             if audience is not None:
                 source.audience = audience

@@ -50,6 +50,19 @@ class Source(Base):
     )
 
 
+class RemovedSource(Base):
+    """Telegram sources deliberately removed by an administrator."""
+
+    __tablename__ = "removed_sources"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    removed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
 class Detection(Base):
     __tablename__ = "detections"
 

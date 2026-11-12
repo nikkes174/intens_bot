@@ -18,7 +18,8 @@ def register_handlers(client, process_message_func=None):
     async def _process_single(source_id, message_id, text, event):
         if not text:
             return False
-        await ensure_source_from_event(event)
+        if not await ensure_source_from_event(event):
+            return False
         try:
             return await process_message_func(
                 source_id=source_id,

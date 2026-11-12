@@ -300,8 +300,8 @@ def source_actions_keyboard(source_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="✅ Вкл/выкл", callback_data=f"source:toggle:{source_id}")],
             [
                 InlineKeyboardButton(
-                    text="🚫 Исключить/вернуть",
-                    callback_data=f"source:exclude:{source_id}",
+                    text="🗑 Удалить канал",
+                    callback_data=f"source:delete:{source_id}",
                 )
             ],
             [
@@ -311,6 +311,23 @@ def source_actions_keyboard(source_id: int) -> InlineKeyboardMarkup:
                 )
             ],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="sources:list")],
+        ]
+    )
+
+
+def confirm_delete_source_keyboard(source_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Да, удалить",
+                    callback_data=f"source:delete_confirm:{source_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=f"source:delete_cancel:{source_id}",
+                ),
+            ]
         ]
     )
 
