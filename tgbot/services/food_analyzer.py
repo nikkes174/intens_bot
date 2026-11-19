@@ -57,6 +57,8 @@ FOOD_ANALYSIS_PROMPT = """Ты — помощник по распознаван�
 nutrition=null, а dish_name — null."""
 
 _JSON_BLOCK = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
+TELEGRAM_MESSAGE_LIMIT = 4096
+RESCALE_WARNING = "Пересчёт выполнен пропорционально новому общему весу блюда."
 
 
 def _extract_json(raw_response: str) -> str:
@@ -92,6 +94,28 @@ def _number(value: float) -> str:
     return f"{value:.1f}".replace(".", ",")
 
 
+def _html_text(value: str, max_length: int) -> str:
+    """Escape text and truncate it without cutting an HTML entity."""
+    raw_value = str(value or "")
+    escaped_value = escape(raw_value)
+    if len(escaped_value) <= max_length:
+        return escaped_value
+
+    suffix = "…"
+    low = 0
+    high = len(raw_value)
+    best = suffix if len(suffix) <= max_length else ""
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = escape(raw_value[:middle]) + suffix
+        if len(candidate) <= max_length:
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
 def _ingredient_icon(name: str) -> str:
     normalized = name.lower()
     if any(word in normalized for word in ("кур", "мяс", "гов", "свин", "индей")):
@@ -111,16 +135,36 @@ def _ingredient_icon(name: str) -> str:
     return "🍽"
 
 
-def format_food_result(analysis: FoodAnalysis) -> str:
-    dish_name = escape(analysis.dish_name or "Блюдо")
-    ingredients = "\n".join(
-        (
-            f"{_ingredient_icon(item.name)} {escape(item.name)} — ~{_number(item.weight_g)} г"
-            if item.weight_g is not None
-            else f"{_ingredient_icon(item.name)} {escape(item.name)} — вес не удалось оценить"
-        )
-        for item in analysis.ingredients
-    )
+def _build_food_result(
+    analysis: FoodAnalysis,
+    *,
+    dish_limit: int,
+    ingredient_limit: int,
+    comment_limit: int,
+    warning_limit: int,
+    additional_limit: int,
+) -> str:
+    dish_name = _html_text(analysis.dish_name or "Блюдо", dish_limit)
+    ingredient_lines = []
+    for item in analysis.ingredients[:12]:
+        name = _html_text(item.name, ingredient_limit)
+        if item.weight_g is not None:
+            ingredient_lines.append(
+                f"{_ingredient_icon(item.name)} {name} — ~{_number(item.weight_g)} г"
+            )
+        else:
+            ingredient_lines.append(
+                f"{_ingredient_icon(item.name)} {name} — вес не удалось оценить"
+            )
+
+    ingredients = "\n".join(ingredient_lines)
+    extra_count = max(0, len(analysis.ingredients) - 12)
+    if extra_count:
+        extra_names = ", ".join(item.name for item in analysis.ingredients[12:20])
+        if extra_count > 8:
+            extra_names += f" (+{extra_count - 8})"
+        ingredients += f"\n➕ Дополнительно: {_html_text(extra_names, additional_limit)}"
+
     nutrition = analysis.nutrition
     if nutrition is None:
         raise ValueError("Для распознанного блюда отсутствует пищевая ценность")
@@ -136,13 +180,54 @@ def format_food_result(analysis: FoodAnalysis) -> str:
         f"🥑 Жиры: ~{_number(nutrition.fats)} г\n"
         f"🍞 Углеводы: ~{_number(nutrition.carbs)} г\n\n"
         "━━━━━━━━━━━━━━━━\n\n"
-        f"💡 <b>О блюде</b>\n\n{escape(analysis.comment)}\n\n"
+        f"💡 <b>О блюде</b>\n\n{_html_text(analysis.comment, comment_limit)}\n\n"
         "⚠️ "
-        f"{escape(warning)}\n"
+        f"{_html_text(warning, warning_limit)}\n"
         "Фактическая калорийность может отличаться от оценки.\n\n"
         "━━━━━━━━━━━━━━━━\n\n"
         "📸 Хочешь проверить другое блюдо?\n"
         "Просто отправь новую фотографию."
+    )
+
+
+def _telegram_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def format_food_result(analysis: FoodAnalysis) -> str:
+    result = _build_food_result(
+        analysis,
+        dish_limit=160,
+        ingredient_limit=80,
+        comment_limit=600,
+        warning_limit=500,
+        additional_limit=300,
+    )
+    if _telegram_length(result) <= TELEGRAM_MESSAGE_LIMIT:
+        return result
+
+    result = _build_food_result(
+        analysis,
+        dish_limit=80,
+        ingredient_limit=40,
+        comment_limit=250,
+        warning_limit=250,
+        additional_limit=160,
+    )
+    if _telegram_length(result) <= TELEGRAM_MESSAGE_LIMIT:
+        return result
+
+    nutrition = analysis.nutrition
+    if nutrition is None:
+        raise ValueError("Для распознанного блюда отсутствует пищевая ценность")
+    return (
+        f"🍽 <b>{_html_text(analysis.dish_name or 'Блюдо', 60)}</b>\n\n"
+        "📊 <b>Примерная пищевая ценность</b>\n\n"
+        f"🔥 Калорийность: ~{_number(nutrition.calories)} ккал\n\n"
+        f"🥩 Белки: ~{_number(nutrition.proteins)} г\n"
+        f"🥑 Жиры: ~{_number(nutrition.fats)} г\n"
+        f"🍞 Углеводы: ~{_number(nutrition.carbs)} г\n\n"
+        "⚠️ Детали ответа сокращены из-за ограничения длины сообщения."
     )
 
 
@@ -174,7 +259,8 @@ def rescale_analysis(analysis: FoodAnalysis, target_weight: float) -> FoodAnalys
         carbs=analysis.nutrition.carbs * multiplier,
     )
     warning = analysis.warning or "Количество масла и соусов неизвестно."
-    warning += " Пересчёт выполнен пропорционально новому общему весу блюда."
+    warning = re.sub(rf"(?:\s*{re.escape(RESCALE_WARNING)})+\s*$", "", warning).strip()
+    warning = f"{warning} {RESCALE_WARNING}".strip()
     return FoodAnalysis(
         recognized=True,
         dish_name=analysis.dish_name,

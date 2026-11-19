@@ -2,6 +2,8 @@ import pytest
 
 from tgbot.schemas.food import FoodAnalysis, Ingredient, Nutrition
 from tgbot.services.food_analyzer import (
+    RESCALE_WARNING,
+    _telegram_length,
     format_food_result,
     format_no_food_result,
     parse_food_analysis,
@@ -93,3 +95,43 @@ def test_format_food_result_marks_unknown_ingredient_weight() -> None:
     )
 
     assert "вес не удалось оценить" in format_food_result(analysis)
+
+
+def test_format_food_result_limits_long_model_response() -> None:
+    analysis = FoodAnalysis(
+        recognized=True,
+        dish_name="<блюдо>" * 28,
+        ingredients=[
+            Ingredient(name=f"<ингредиент {index}> &", weight_g=index + 1) for index in range(100)
+        ],
+        nutrition=Nutrition(calories=100, proteins=10, fats=5, carbs=20),
+        comment="Комментарий " * 80,
+        warning="Предупреждение " * 60,
+    )
+
+    result = format_food_result(analysis)
+
+    assert _telegram_length(result) <= 4096
+    assert "~100 ккал" in result
+    assert result.count("<b>") == result.count("</b>")
+    assert "&lt;ингредиент" in result
+
+
+def test_rescale_analysis_does_not_duplicate_warning() -> None:
+    analysis = FoodAnalysis(
+        recognized=True,
+        dish_name="Овсянка",
+        ingredients=[Ingredient(name="Овсянка", weight_g=100)],
+        nutrition=Nutrition(calories=300, proteins=10, fats=5, carbs=50),
+    )
+
+    first = rescale_analysis(analysis, 200)
+    assert first is not None
+    second = rescale_analysis(first, 300)
+
+    assert second is not None
+    assert second.warning is not None
+    assert second.warning.count(RESCALE_WARNING) == 1
+    assert second.ingredients[0].weight_g == 300
+    assert second.nutrition is not None
+    assert second.nutrition.calories == 900

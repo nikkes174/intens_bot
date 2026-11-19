@@ -7,8 +7,11 @@ import pytest
 from tgbot.services.openrouter import (
     OpenRouterAuthError,
     OpenRouterClient,
+    OpenRouterPaymentError,
     OpenRouterRateLimitError,
+    OpenRouterRequestError,
     OpenRouterResponseError,
+    OpenRouterServerError,
 )
 
 
@@ -49,13 +52,19 @@ async def test_openrouter_builds_multimodal_request() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status_code", "exception"),
-    [(401, OpenRouterAuthError), (429, OpenRouterRateLimitError), (500, OpenRouterResponseError)],
+    [
+        (401, OpenRouterAuthError),
+        (402, OpenRouterPaymentError),
+        (404, OpenRouterRequestError),
+        (429, OpenRouterRateLimitError),
+        (500, OpenRouterServerError),
+    ],
 )
 async def test_openrouter_maps_api_errors(status_code: int, exception: type[Exception]) -> None:
     http_client = httpx.AsyncClient(
         transport=httpx.MockTransport(lambda request: httpx.Response(status_code))
     )
-    client = OpenRouterClient("key", "model", http_client=http_client)
+    client = OpenRouterClient("key", "model:free", http_client=http_client)
     try:
         with pytest.raises(exception):
             await client.analyze_photo(b"image", "prompt")
@@ -70,7 +79,7 @@ async def test_openrouter_rejects_empty_model_answer() -> None:
             lambda request: httpx.Response(200, json={"choices": [{"message": {"content": " "}}]})
         )
     )
-    client = OpenRouterClient("key", "model", http_client=http_client)
+    client = OpenRouterClient("key", "model:free", http_client=http_client)
     try:
         with pytest.raises(OpenRouterResponseError):
             await client.analyze_photo(b"image", "prompt")

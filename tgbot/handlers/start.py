@@ -1,7 +1,9 @@
 from aiogram import Router
 from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
+from tgbot.handlers.photo import reset_user_flow
 from tgbot.keyboards.main import main_menu_keyboard
 
 router = Router(name="start")
@@ -21,5 +23,7 @@ START_TEXT = (
 
 
 @router.message(CommandStart())
-async def start_handler(message: Message) -> None:
+async def start_handler(message: Message, state: FSMContext) -> None:
+    user_id = message.from_user.id if message.from_user else message.chat.id
+    await reset_user_flow(state, user_id)
     await message.answer(START_TEXT, reply_markup=main_menu_keyboard())

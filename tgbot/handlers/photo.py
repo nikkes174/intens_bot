@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import re
+from collections import defaultdict
 from io import BytesIO
 
 from aiogram import F, Router
@@ -25,7 +27,17 @@ from tgbot.services.image_processor import (
     ImageProcessingError,
     prepare_image,
 )
-from tgbot.services.openrouter import OpenRouterClient, OpenRouterError
+from tgbot.services.openrouter import (
+    OpenRouterAuthError,
+    OpenRouterClient,
+    OpenRouterError,
+    OpenRouterPaymentError,
+    OpenRouterRateLimitError,
+    OpenRouterRequestError,
+    OpenRouterServerError,
+    OpenRouterTimeoutError,
+    OpenRouterUnavailableError,
+)
 
 logger = logging.getLogger(__name__)
 router = Router(name="photo")
@@ -35,11 +47,57 @@ PHOTO_REQUEST_TEXT = "📸 Отправь фотографию еды, кото�
 GENERIC_ERROR_TEXT = (
     "⚠️ Не удалось проанализировать фотографию.\n\nПопробуй отправить её ещё раз немного позже."
 )
+BUSY_TEXT = "🔍 Анализ ещё выполняется. Дождись результата и отправь следующую фотографию позже."
+STALE_RESULT_TEXT = "Этот результат уже неактуален.\nОтправь новую фотографию."
 WEIGHT_PATTERN = re.compile(r"^\d+(?:[.,]\d+)?$")
+
+LAST_ANALYSIS_KEY = "last_analysis"
+ACTIVE_MESSAGE_ID_KEY = "active_result_message_id"
+ACTIVE_USER_ID_KEY = "active_result_user_id"
+ACTIVE_CHAT_ID_KEY = "active_result_chat_id"
+
+_USER_LOCKS: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+_USER_GENERATIONS: defaultdict[int, int] = defaultdict(int)
 
 
 class FoodStates(StatesGroup):
     waiting_for_weight = State()
+
+
+def _user_id(message: Message) -> int:
+    return message.from_user.id if message.from_user else message.chat.id
+
+
+def invalidate_user_flow(user_id: int) -> int:
+    _USER_GENERATIONS[user_id] += 1
+    return _USER_GENERATIONS[user_id]
+
+
+async def reset_user_flow(state: FSMContext, user_id: int) -> None:
+    invalidate_user_flow(user_id)
+    await state.clear()
+
+
+def _is_current_generation(user_id: int, generation: int) -> bool:
+    return _USER_GENERATIONS[user_id] == generation
+
+
+async def _store_result(
+    state: FSMContext,
+    result_message: Message,
+    analysis: FoodAnalysis | None,
+    user_id: int,
+    chat_id: int,
+) -> None:
+    await state.set_state(None)
+    await state.update_data(
+        **{
+            LAST_ANALYSIS_KEY: analysis.model_dump() if analysis else None,
+            ACTIVE_MESSAGE_ID_KEY: result_message.message_id,
+            ACTIVE_USER_ID_KEY: user_id,
+            ACTIVE_CHAT_ID_KEY: chat_id,
+        }
+    )
 
 
 def _is_too_large(size: int | None) -> bool:
@@ -67,11 +125,47 @@ async def _download_photo(message: Message, bot) -> bytes:
     return image_bytes
 
 
-async def _edit_result(message: Message, text: str, reply_markup) -> None:
+async def _edit_result(message: Message, text: str, reply_markup) -> Message:
     try:
         await message.edit_text(text, reply_markup=reply_markup)
+        return message
     except TelegramBadRequest:
-        await message.answer(text, reply_markup=reply_markup)
+        return await message.answer(text, reply_markup=reply_markup)
+
+
+def _openrouter_error_text(error: OpenRouterError) -> str:
+    if isinstance(error, OpenRouterAuthError):
+        return "⚠️ Неверный API-ключ OpenRouter или недостаточно прав доступа."
+    if isinstance(error, OpenRouterPaymentError):
+        return "⚠️ Для запроса OpenRouter недостаточно средств или кредитов."
+    if isinstance(error, OpenRouterRateLimitError):
+        return "⚠️ Лимит запросов OpenRouter временно превышен. Попробуй позже."
+    if isinstance(error, OpenRouterRequestError):
+        return "⚠️ Ошибка запроса или выбранная модель OpenRouter недоступна."
+    if isinstance(error, OpenRouterTimeoutError):
+        return "⚠️ OpenRouter не ответил вовремя. Попробуй ещё раз позже."
+    if isinstance(error, (OpenRouterServerError, OpenRouterUnavailableError)):
+        return "⚠️ OpenRouter временно недоступен. Попробуй ещё раз позже."
+    return GENERIC_ERROR_TEXT
+
+
+async def _is_current_result(callback: CallbackQuery, state: FSMContext) -> bool:
+    callback_message = callback.message
+    if callback_message is None:
+        await callback.answer()
+        return False
+
+    data = await state.get_data()
+    is_current = (
+        data.get(ACTIVE_MESSAGE_ID_KEY) == callback_message.message_id
+        and data.get(ACTIVE_USER_ID_KEY) == callback.from_user.id
+        and data.get(ACTIVE_CHAT_ID_KEY) == callback_message.chat.id
+    )
+    await callback.answer()
+    if not is_current:
+        await callback_message.answer(STALE_RESULT_TEXT)
+        return False
+    return True
 
 
 async def _handle_image(
@@ -80,42 +174,72 @@ async def _handle_image(
     bot,
     openrouter: OpenRouterClient,
 ) -> None:
-    analysis_message = await message.answer(ANALYZING_TEXT)
-    image_bytes: bytes | None = None
-    prepared_image: bytes | None = None
+    user_id = _user_id(message)
+    user_lock = _USER_LOCKS[user_id]
+    if user_lock.locked():
+        await message.answer(BUSY_TEXT)
+        return
 
-    try:
-        image_bytes = await _download_photo(message, bot)
-        prepared_image = prepare_image(image_bytes)
-        analysis = await analyze_food(prepared_image, openrouter)
+    async with user_lock:
+        generation = invalidate_user_flow(user_id)
+        await state.clear()
+        analysis_message = await message.answer(ANALYZING_TEXT)
+        image_bytes: bytes | None = None
+        prepared_image: bytes | None = None
 
-        if not analysis.recognized:
-            await state.update_data(last_analysis=None)
-            await _edit_result(analysis_message, format_no_food_result(), retry_keyboard())
-            return
+        try:
+            image_bytes = await _download_photo(message, bot)
+            prepared_image = prepare_image(image_bytes)
+            analysis = await analyze_food(prepared_image, openrouter)
 
-        await state.update_data(last_analysis=analysis.model_dump())
-        await _edit_result(analysis_message, format_food_result(analysis), analysis_keyboard())
-    except ImageProcessingError as error:
-        if str(error) == "Изображение слишком большое":
-            text = "⚠️ Фотография слишком большая. Отправь изображение меньшего размера."
-        else:
-            text = GENERIC_ERROR_TEXT
-        logger.info("Image processing failed: %s", error.__class__.__name__)
-        await _edit_result(analysis_message, text, retry_keyboard())
-    except OpenRouterError as error:
-        logger.warning("OpenRouter request failed: %s", error.__class__.__name__)
-        await _edit_result(analysis_message, GENERIC_ERROR_TEXT, retry_keyboard())
-    except Exception:
-        logger.exception("Unexpected food analysis error")
-        await _edit_result(analysis_message, GENERIC_ERROR_TEXT, retry_keyboard())
-    finally:
-        del image_bytes
-        del prepared_image
+            if not _is_current_generation(user_id, generation):
+                return
+
+            if not analysis.recognized:
+                result_message = await _edit_result(
+                    analysis_message, format_no_food_result(), retry_keyboard()
+                )
+                await _store_result(state, result_message, None, user_id, message.chat.id)
+                return
+
+            result_message = await _edit_result(
+                analysis_message, format_food_result(analysis), analysis_keyboard()
+            )
+            await _store_result(state, result_message, analysis, user_id, message.chat.id)
+        except ImageProcessingError as error:
+            if not _is_current_generation(user_id, generation):
+                return
+            if str(error) == "Изображение слишком большое":
+                text = "⚠️ Фотография слишком большая. Отправь изображение меньшего размера."
+            else:
+                text = GENERIC_ERROR_TEXT
+            logger.info("Image processing failed: %s", error.__class__.__name__)
+            result_message = await _edit_result(analysis_message, text, retry_keyboard())
+            await _store_result(state, result_message, None, user_id, message.chat.id)
+        except OpenRouterError as error:
+            if not _is_current_generation(user_id, generation):
+                return
+            logger.warning("OpenRouter request failed: %s", error.__class__.__name__)
+            result_message = await _edit_result(
+                analysis_message, _openrouter_error_text(error), retry_keyboard()
+            )
+            await _store_result(state, result_message, None, user_id, message.chat.id)
+        except Exception:
+            if not _is_current_generation(user_id, generation):
+                return
+            logger.exception("Unexpected food analysis error")
+            result_message = await _edit_result(
+                analysis_message, GENERIC_ERROR_TEXT, retry_keyboard()
+            )
+            await _store_result(state, result_message, None, user_id, message.chat.id)
+        finally:
+            del image_bytes
+            del prepared_image
 
 
 @router.message(F.text == "📸 Распознать еду")
-async def ask_for_photo(message: Message) -> None:
+async def ask_for_photo(message: Message, state: FSMContext) -> None:
+    await reset_user_flow(state, _user_id(message))
     await message.answer(PHOTO_REQUEST_TEXT, reply_markup=main_menu_keyboard())
 
 
@@ -137,17 +261,18 @@ async def image_document_handler(
 
 @router.callback_query(F.data == "analyze_again")
 async def analyze_again_handler(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    await state.set_state(None)
-    await state.update_data(last_analysis=None)
+    if not await _is_current_result(callback, state):
+        return
+    await reset_user_flow(state, callback.from_user.id)
     await callback.message.answer(PHOTO_REQUEST_TEXT, reply_markup=main_menu_keyboard())
 
 
 @router.callback_query(F.data == "refine_weight")
 async def refine_weight_handler(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
+    if not await _is_current_result(callback, state):
+        return
     data = await state.get_data()
-    if not data.get("last_analysis"):
+    if not data.get(LAST_ANALYSIS_KEY):
         await callback.message.answer(
             "Сначала отправь фотографию еды, чтобы было что пересчитывать.",
             reply_markup=main_menu_keyboard(),
@@ -173,18 +298,21 @@ async def weight_handler(message: Message, state: FSMContext) -> None:
 
     data = await state.get_data()
     try:
-        previous_analysis = FoodAnalysis.model_validate(data.get("last_analysis"))
+        previous_analysis = FoodAnalysis.model_validate(data.get(LAST_ANALYSIS_KEY))
         updated_analysis = rescale_analysis(previous_analysis, target_weight)
     except (TypeError, ValueError):
         updated_analysis = None
 
-    await state.set_state(None)
     if updated_analysis is None:
+        await reset_user_flow(state, _user_id(message))
         await message.answer(
             "⚠️ Не могу корректно пересчитать результат: исходный вес ингредиентов неизвестен.",
             reply_markup=main_menu_keyboard(),
         )
         return
 
-    await state.update_data(last_analysis=updated_analysis.model_dump())
-    await message.answer(format_food_result(updated_analysis), reply_markup=analysis_keyboard())
+    await state.set_state(None)
+    result_message = await message.answer(
+        format_food_result(updated_analysis), reply_markup=analysis_keyboard()
+    )
+    await _store_result(state, result_message, updated_analysis, _user_id(message), message.chat.id)

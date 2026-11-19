@@ -12,12 +12,15 @@
 BOT_TOKEN=токен_бота
 OPENROUTER_API_KEY=ключ_openrouter
 OPENROUTER_MODEL=provider/model:free
+OPENROUTER_ALLOW_PAID=false
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_TIMEOUT=45
 LOG_LEVEL=INFO
 ```
 
 `OPENROUTER_MODEL` обязателен и нигде не зашит в коде. Можно указать любую доступную мультимодальную модель OpenRouter, в том числе бесплатную. Если `BOT_TOKEN`, `OPENROUTER_API_KEY` или `OPENROUTER_MODEL` не заданы, бот завершится с понятным сообщением конфигурации.
+
+По умолчанию разрешены только модели с суффиксом `:free`. Чтобы явно разрешить указанную платную модель, установите `OPENROUTER_ALLOW_PAID=true`.
 
 ## Локальный запуск
 

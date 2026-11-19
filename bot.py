@@ -48,6 +48,7 @@ async def main() -> None:
     openrouter = OpenRouterClient(
         api_key=settings.openrouter_api_key,
         model=settings.openrouter_model,
+        allow_paid=settings.openrouter_allow_paid,
         base_url=settings.openrouter_base_url,
         timeout=settings.openrouter_timeout,
     )
