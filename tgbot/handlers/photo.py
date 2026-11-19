@@ -1,7 +1,8 @@
 import asyncio
 import logging
 import re
-from collections import defaultdict
+from contextlib import suppress
+from dataclasses import dataclass, field
 from io import BytesIO
 
 from aiogram import F, Router
@@ -49,6 +50,7 @@ GENERIC_ERROR_TEXT = (
 )
 BUSY_TEXT = "🔍 Анализ ещё выполняется. Дождись результата и отправь следующую фотографию позже."
 STALE_RESULT_TEXT = "Этот результат уже неактуален.\nОтправь новую фотографию."
+CANCELLED_TEXT = "❌ Анализ отменён."
 WEIGHT_PATTERN = re.compile(r"^\d+(?:[.,]\d+)?$")
 
 LAST_ANALYSIS_KEY = "last_analysis"
@@ -56,8 +58,16 @@ ACTIVE_MESSAGE_ID_KEY = "active_result_message_id"
 ACTIVE_USER_ID_KEY = "active_result_user_id"
 ACTIVE_CHAT_ID_KEY = "active_result_chat_id"
 
-_USER_LOCKS: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
-_USER_GENERATIONS: defaultdict[int, int] = defaultdict(int)
+
+@dataclass
+class _UserRuntime:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    generation: int = 0
+    task: asyncio.Task | None = None
+    analysis_message: Message | None = None
+
+
+_USER_STATES: dict[int, _UserRuntime] = {}
 
 
 class FoodStates(StatesGroup):
@@ -68,18 +78,51 @@ def _user_id(message: Message) -> int:
     return message.from_user.id if message.from_user else message.chat.id
 
 
+def _cleanup_inactive_user_states() -> None:
+    for user_id, runtime in list(_USER_STATES.items()):
+        if runtime.task is None and not runtime.lock.locked():
+            _USER_STATES.pop(user_id, None)
+
+
+def _get_user_runtime(user_id: int) -> _UserRuntime:
+    _cleanup_inactive_user_states()
+    return _USER_STATES.setdefault(user_id, _UserRuntime())
+
+
 def invalidate_user_flow(user_id: int) -> int:
-    _USER_GENERATIONS[user_id] += 1
-    return _USER_GENERATIONS[user_id]
+    runtime = _get_user_runtime(user_id)
+    runtime.generation += 1
+    return runtime.generation
 
 
 async def reset_user_flow(state: FSMContext, user_id: int) -> None:
-    invalidate_user_flow(user_id)
+    runtime = _USER_STATES.get(user_id)
+    if runtime is not None:
+        runtime.generation += 1
     await state.clear()
 
+    if runtime is not None:
+        task = runtime.task
+        current_task = asyncio.current_task()
+        if task is not None and task is not current_task:
+            if not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+    _cleanup_inactive_user_states()
 
-def _is_current_generation(user_id: int, generation: int) -> bool:
-    return _USER_GENERATIONS[user_id] == generation
+
+def _is_current_generation(user_id: int, generation: int, runtime: _UserRuntime) -> bool:
+    return _USER_STATES.get(user_id) is runtime and runtime.generation == generation
+
+
+async def _mark_analysis_cancelled(analysis_message: Message | None) -> None:
+    if analysis_message is None:
+        return
+    try:
+        await _edit_result(analysis_message, CANCELLED_TEXT, None)
+    except Exception:
+        logger.warning("Could not update cancelled analysis message")
 
 
 async def _store_result(
@@ -175,66 +218,83 @@ async def _handle_image(
     openrouter: OpenRouterClient,
 ) -> None:
     user_id = _user_id(message)
-    user_lock = _USER_LOCKS[user_id]
-    if user_lock.locked():
+    _cleanup_inactive_user_states()
+    runtime = _get_user_runtime(user_id)
+    if runtime.lock.locked():
         await message.answer(BUSY_TEXT)
         return
 
-    async with user_lock:
-        generation = invalidate_user_flow(user_id)
-        await state.clear()
-        analysis_message = await message.answer(ANALYZING_TEXT)
-        image_bytes: bytes | None = None
-        prepared_image: bytes | None = None
+    try:
+        async with runtime.lock:
+            generation = invalidate_user_flow(user_id)
+            runtime.task = asyncio.current_task()
+            await state.clear()
+            analysis_message: Message | None = None
+            image_bytes: bytes | None = None
+            prepared_image: bytes | None = None
 
-        try:
-            image_bytes = await _download_photo(message, bot)
-            prepared_image = prepare_image(image_bytes)
-            analysis = await analyze_food(prepared_image, openrouter)
+            try:
+                analysis_message = await message.answer(ANALYZING_TEXT)
+                runtime.analysis_message = analysis_message
+                image_bytes = await _download_photo(message, bot)
+                prepared_image = prepare_image(image_bytes)
+                analysis = await analyze_food(prepared_image, openrouter)
 
-            if not _is_current_generation(user_id, generation):
-                return
+                if not _is_current_generation(user_id, generation, runtime):
+                    await _mark_analysis_cancelled(analysis_message)
+                    return
 
-            if not analysis.recognized:
+                if not analysis.recognized:
+                    result_message = await _edit_result(
+                        analysis_message, format_no_food_result(), retry_keyboard()
+                    )
+                    await _store_result(state, result_message, None, user_id, message.chat.id)
+                    return
+
                 result_message = await _edit_result(
-                    analysis_message, format_no_food_result(), retry_keyboard()
+                    analysis_message, format_food_result(analysis), analysis_keyboard()
+                )
+                await _store_result(state, result_message, analysis, user_id, message.chat.id)
+            except asyncio.CancelledError:
+                await _mark_analysis_cancelled(analysis_message)
+                raise
+            except ImageProcessingError as error:
+                if not _is_current_generation(user_id, generation, runtime):
+                    await _mark_analysis_cancelled(analysis_message)
+                    return
+                if str(error) == "Изображение слишком большое":
+                    text = "⚠️ Фотография слишком большая. Отправь изображение меньшего размера."
+                else:
+                    text = GENERIC_ERROR_TEXT
+                logger.info("Image processing failed: %s", error.__class__.__name__)
+                result_message = await _edit_result(analysis_message, text, retry_keyboard())
+                await _store_result(state, result_message, None, user_id, message.chat.id)
+            except OpenRouterError as error:
+                if not _is_current_generation(user_id, generation, runtime):
+                    await _mark_analysis_cancelled(analysis_message)
+                    return
+                logger.warning("OpenRouter request failed: %s", error.__class__.__name__)
+                result_message = await _edit_result(
+                    analysis_message, _openrouter_error_text(error), retry_keyboard()
                 )
                 await _store_result(state, result_message, None, user_id, message.chat.id)
-                return
-
-            result_message = await _edit_result(
-                analysis_message, format_food_result(analysis), analysis_keyboard()
-            )
-            await _store_result(state, result_message, analysis, user_id, message.chat.id)
-        except ImageProcessingError as error:
-            if not _is_current_generation(user_id, generation):
-                return
-            if str(error) == "Изображение слишком большое":
-                text = "⚠️ Фотография слишком большая. Отправь изображение меньшего размера."
-            else:
-                text = GENERIC_ERROR_TEXT
-            logger.info("Image processing failed: %s", error.__class__.__name__)
-            result_message = await _edit_result(analysis_message, text, retry_keyboard())
-            await _store_result(state, result_message, None, user_id, message.chat.id)
-        except OpenRouterError as error:
-            if not _is_current_generation(user_id, generation):
-                return
-            logger.warning("OpenRouter request failed: %s", error.__class__.__name__)
-            result_message = await _edit_result(
-                analysis_message, _openrouter_error_text(error), retry_keyboard()
-            )
-            await _store_result(state, result_message, None, user_id, message.chat.id)
-        except Exception:
-            if not _is_current_generation(user_id, generation):
-                return
-            logger.exception("Unexpected food analysis error")
-            result_message = await _edit_result(
-                analysis_message, GENERIC_ERROR_TEXT, retry_keyboard()
-            )
-            await _store_result(state, result_message, None, user_id, message.chat.id)
-        finally:
-            del image_bytes
-            del prepared_image
+            except Exception:
+                if not _is_current_generation(user_id, generation, runtime):
+                    await _mark_analysis_cancelled(analysis_message)
+                    return
+                logger.exception("Unexpected food analysis error")
+                result_message = await _edit_result(
+                    analysis_message, GENERIC_ERROR_TEXT, retry_keyboard()
+                )
+                await _store_result(state, result_message, None, user_id, message.chat.id)
+            finally:
+                del image_bytes
+                del prepared_image
+                runtime.analysis_message = None
+                if runtime.task is asyncio.current_task():
+                    runtime.task = None
+    finally:
+        _cleanup_inactive_user_states()
 
 
 @router.message(F.text == "📸 Распознать еду")
