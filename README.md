@@ -10,6 +10,7 @@
 
 ```env
 BOT_TOKEN=токен_бота
+ADMINS_IDS=123456789,987654321
 OPENROUTER_API_KEY=ключ_openrouter
 OPENROUTER_MODEL=provider/model:free
 OPENROUTER_ALLOW_PAID=false
@@ -18,7 +19,9 @@ OPENROUTER_TIMEOUT=45
 LOG_LEVEL=INFO
 ```
 
-`OPENROUTER_MODEL` обязателен и нигде не зашит в коде. Можно указать любую доступную мультимодальную модель OpenRouter, в том числе бесплатную. Если `BOT_TOKEN`, `OPENROUTER_API_KEY` или `OPENROUTER_MODEL` не заданы, бот завершится с понятным сообщением конфигурации.
+`ADMINS_IDS` обязателен: укажите один или несколько положительных Telegram ID через запятую. Пробелы разрешены, дубликаты удаляются. Пользователи вне этого списка полностью игнорируются. Если `ADMINS_IDS`, `BOT_TOKEN`, `OPENROUTER_API_KEY` или `OPENROUTER_MODEL` не заданы, бот завершится с понятным сообщением конфигурации.
+
+`OPENROUTER_MODEL` обязателен и нигде не зашит в коде. Можно указать любую доступную мультимодальную модель OpenRouter, в том числе бесплатную.
 
 По умолчанию разрешены только модели с суффиксом `:free`. Чтобы явно разрешить указанную платную модель, установите `OPENROUTER_ALLOW_PAID=true`.
 

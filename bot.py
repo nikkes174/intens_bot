@@ -10,6 +10,7 @@ from aiogram.types import BotCommand, BotCommandScopeDefault, MenuButtonCommands
 from tgbot.config import ConfigError, Settings, load_config
 from tgbot.handlers.photo import router as photo_router
 from tgbot.handlers.start import router as start_router
+from tgbot.middlewares.access import AccessMiddleware
 from tgbot.services.openrouter import OpenRouterClient
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ def create_dispatcher(settings: Settings, openrouter: OpenRouterClient) -> Dispa
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher["settings"] = settings
     dispatcher["openrouter"] = openrouter
+    dispatcher.update.outer_middleware(AccessMiddleware(settings.admins_ids))
     dispatcher.include_router(start_router)
     dispatcher.include_router(photo_router)
     return dispatcher

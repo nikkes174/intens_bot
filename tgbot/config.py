@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -11,6 +12,7 @@ class ConfigError(ValueError):
 
 class Settings(BaseModel):
     bot_token: str = Field(min_length=1)
+    admins_ids: frozenset[int]
     openrouter_api_key: str = Field(min_length=1)
     openrouter_model: str = Field(min_length=1)
     openrouter_allow_paid: bool = False
@@ -52,12 +54,32 @@ def _parse_bool(value: str, variable_name: str) -> bool:
     )
 
 
+def _parse_admins_ids(value: str | None) -> frozenset[int]:
+    if value is None or not value.strip():
+        raise ConfigError("ADMINS_IDS не указан. Запуск бота запрещён.")
+
+    raw_ids = [item.strip() for item in value.split(",")]
+    if any(not item or re.fullmatch(r"[0-9]+", item) is None for item in raw_ids):
+        raise ConfigError(
+            "ADMINS_IDS содержит некорректное значение. Используйте положительные целые ID, "
+            "разделённые запятыми."
+        )
+
+    admin_ids = frozenset(int(item) for item in raw_ids)
+    if any(admin_id <= 0 for admin_id in admin_ids):
+        raise ConfigError(
+            "ADMINS_IDS содержит некорректное значение. Каждый ID должен быть положительным."
+        )
+    return admin_ids
+
+
 def load_config(path: str | Path | None = ".env") -> Settings:
     if path is not None:
         load_dotenv(path)
 
     env_values = {
         "bot_token": os.getenv("BOT_TOKEN", "").strip(),
+        "admins_ids": _parse_admins_ids(os.getenv("ADMINS_IDS")),
         "openrouter_api_key": os.getenv("OPENROUTER_API_KEY", "").strip(),
         "openrouter_model": os.getenv("OPENROUTER_MODEL", "").strip(),
         "openrouter_allow_paid": _parse_bool(
