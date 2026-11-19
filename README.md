@@ -1,191 +1,62 @@
-# Intens Bot — Telegram-бот для продажи тренировок
+# Telegram-бот «Что я ем?»
 
-Telegram-бот для продажи пяти отдельных тренировок с оплатой через YooKassa,
-автоматической выдачей материалов и защищённым доступом в приватные группы.
+Простой Telegram-бот, который принимает фотографию еды, отправляет подготовленное изображение в OpenRouter и возвращает приблизительную оценку блюд, ингредиентов, веса, калорий и БЖУ.
 
-## Возможности
-
-- Каталог из 5 тренировок с описаниями и ценами
-- Оплата через YooKassa с webhook-подтверждением
-- Автоматическая выдача материалов (видео, PDF, документы, фото, аудио, текст)
-- Приватные Telegram-группы с заявками на вступление
-- Админ-панель внутри Telegram (/admin)
-- Статистика продаж
-- Надёжная очередь задач (transactional outbox)
-- Повторная выдача материалов
-
-## Установка
-
-### Локальный запуск
-
-1. Клонируйте репозиторий:
-
-```bash
-git clone https://github.com/nikkes174/intens_bot.git
-cd intens_bot
-git checkout bulki_bot
-```
-
-2. Создайте виртуальное окружение:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# или
-.venv\Scripts\activate  # Windows
-```
-
-3. Установите зависимости:
-
-```bash
-pip install -r requirements-dev.txt
-```
-
-4. Создайте файл `.env`:
-
-```bash
-cp .env.example .env
-```
-
-5. Заполните `.env` своими значениями:
-
-```env
-BOT_TOKEN=ваш_токен_бота
-ADMINS=ваш_telegram_id
-DB=sqlite+aiosqlite:///bot.db
-YOOKASSA_SHOP_ID=ваш_shop_id
-YOOKASSA_SECRET_KEY=ваш_secret_key
-YOOKASSA_RETURN_URL=https://t.me/your_bot_username
-YOOKASSA_VAT_CODE=1
-WEBHOOK_HOST=0.0.0.0
-WEBHOOK_PORT=8000
-LOG_LEVEL=INFO
-```
-
-6. Запустите бота:
-
-```bash
-python -m bot
-```
-
-### Docker
-
-1. Создайте файл `.env` (см. выше)
-
-2. Запустите через Docker Compose:
-
-```bash
-docker-compose up -d
-```
-
-3. Проверьте логи:
-
-```bash
-docker-compose logs -f bot
-```
-
-## YooKassa Webhook
-
-1. В личном кабинете YooKassa укажите URL webhook:
-
-```
-https://ваш_домен/webhooks/yookassa
-```
-
-2. Убедитесь, что бот имеет публичный HTTPS-адрес (например, через ngrok или сервер)
-
-3. YooKassa будет отправлять уведомления о событиях:
-   - `payment.succeeded` — успешная оплата
-   - `payment.canceled` — отмена платежа
-
-## Telegram-группы
-
-1. Создайте приватную группу для каждой тренировки
-2. Добавьте бота администратором с правами:
-   - Приглашение пользователей
-   - Одобрение заявок на вступление
-3. В админ-панели бота выберите "Привязать группу"
-4. Отправьте `/chatid` в группу, чтобы получить chat_id
-5. Введите chat_id в админ-панели
-
-## Админ-панель
-
-1. Отправьте `/admin` в бота
-2. Доступные разделы:
-   - Управление тренировками — изменение названий, описаний, цен
-   - Материалы тренировок — загрузка и управление файлами
-   - Пользователи и покупки — поиск пользователей, история заказов
-   - Статистика — продажи, выручка, отменённые заказы
-
-## Тестирование
-
-```bash
-# Все тесты
-pytest -v
-
-# Конкретный модуль
-pytest tests/test_payments.py -v
-
-# С покрытием
-pytest --cov=tgbot tests/
-```
-
-## Структура проекта
-
-```
-tgbot/
-├── config.py          # Конфигурация
-├── db/
-│   ├── models.py      # SQLAlchemy модели
-│   ├── db.py          # Подключение к БД
-│   ├── repositories/  # Репозитории для работы с данными
-│   └── seed.py        # Начальные данные
-├── handlers/
-│   ├── user.py        # Пользовательские обработчики
-│   └── admin.py       # Админ-панель
-├── keyboards/         # Клавиатуры
-├── services/          # Бизнес-логика
-│   ├── payment.py     # Интеграция с YooKassa
-│   ├── delivery.py    # Выдача материалов
-│   ├── access.py      # Управление доступом
-│   └── outbox.py      # Очередь задач
-├── webhooks/          # Webhook API
-└── middlewares/       # Middleware
-tests/                 # Тесты
-alembic/               # Миграции БД
-bot.py                 # Точка входа
-docker-compose.yml     # Docker Compose
-Dockerfile             # Docker образ
-```
-
-## Миграции БД
-
-```bash
-# Создать миграцию
-alembic revision --autogenerate -m "описание"
-
-# Применить миграции
-alembic upgrade head
-
-# Откатить миграцию
-alembic downgrade -1
-```
+Бот не требует регистрации и не использует базу данных. Изображение хранится только в оперативной памяти во время запроса. Результат для кнопки уточнения веса временно хранится в `MemoryStorage` и исчезает после перезапуска.
 
 ## Переменные окружения
 
-| Переменная | Описание |
-|---|---|
-| BOT_TOKEN | Токен Telegram-бота |
-| ADMINS | ID администраторов (через запятую) |
-| DB | URL базы данных |
-| YOOKASSA_SHOP_ID | ID магазина YooKassa |
-| YOOKASSA_SECRET_KEY | Секретный ключ YooKassa |
-| YOOKASSA_RETURN_URL | URL возврата после оплаты |
-| YOOKASSA_VAT_CODE | Код НДС |
-| WEBHOOK_HOST | Хост webhook-сервера |
-| WEBHOOK_PORT | Порт webhook-сервера |
-| LOG_LEVEL | Уровень логирования |
+Скопируйте `.env.example` в `.env` и заполните:
 
-## Лицензия
+```env
+BOT_TOKEN=токен_бота
+OPENROUTER_API_KEY=ключ_openrouter
+OPENROUTER_MODEL=provider/model:free
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_TIMEOUT=45
+LOG_LEVEL=INFO
+```
 
-MIT
+`OPENROUTER_MODEL` обязателен и нигде не зашит в коде. Можно указать любую доступную мультимодальную модель OpenRouter, в том числе бесплатную. Если `BOT_TOKEN`, `OPENROUTER_API_KEY` или `OPENROUTER_MODEL` не заданы, бот завершится с понятным сообщением конфигурации.
+
+## Локальный запуск
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+cp .env.example .env
+python -m bot
+```
+
+Бот работает через Telegram long polling. Порты не открываются.
+
+## Docker
+
+```bash
+cp .env.example .env
+# заполните .env
+docker compose up -d --build
+docker compose logs -f eat_bot
+```
+
+Используется один контейнер `eat_bot`; PostgreSQL, Redis, SQLite, volumes и webhook-сервер не нужны.
+
+## Как это работает
+
+1. Пользователь отправляет фото напрямую или нажимает «📸 Распознать еду».
+2. Бот загружает файл в память, проверяет его и преобразует Pillow в JPEG с максимальной стороной 1536 px.
+3. OpenRouter получает мультимодальный запрос с JSON-инструкцией.
+4. Pydantic проверяет ответ модели.
+5. Бот показывает понятный текст на русском языке и кнопки для нового фото или пропорционального уточнения веса.
+
+Оценки веса, калорий и БЖУ приблизительные. Скрытые ингредиенты, масло, соусы и способ приготовления могут быть неизвестны.
+
+## Тесты
+
+```bash
+pytest -q
+ruff check .
+```
+
+Тесты используют mock HTTP-клиент и не обращаются к Telegram или OpenRouter.

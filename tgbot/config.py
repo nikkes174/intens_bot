@@ -1,88 +1,63 @@
-from dataclasses import dataclass, field
+import os
+from pathlib import Path
 
-from environs import Env
-
-
-@dataclass
-class DbConfig:
-    url: str = "sqlite+aiosqlite:///bot.db"
-
-    @staticmethod
-    def from_env(env: Env) -> "DbConfig":
-        url = env.str("DB", "sqlite+aiosqlite:///bot.db")
-        return DbConfig(url=url)
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field, field_validator
 
 
-@dataclass
-class TgBot:
-    token: str
-    admin_ids: list[int] = field(default_factory=list)
-
-    @staticmethod
-    def from_env(env: Env) -> "TgBot":
-        token = env.str("BOT_TOKEN")
-        admin_ids = list(map(int, env.list("ADMINS", subcast=int)))
-        return TgBot(token=token, admin_ids=admin_ids)
+class ConfigError(ValueError):
+    """Ошибка обязательной конфигурации приложения."""
 
 
-@dataclass
-class YooKassaConfig:
-    shop_id: str = ""
-    secret_key: str = ""
-    return_url: str = ""
-    vat_code: int = 1
-    webhook_path: str = "/webhooks/yookassa"
-
-    @staticmethod
-    def from_env(env: Env) -> "YooKassaConfig":
-        return YooKassaConfig(
-            shop_id=env.str("YOOKASSA_SHOP_ID", ""),
-            secret_key=env.str("YOOKASSA_SECRET_KEY", ""),
-            return_url=env.str("YOOKASSA_RETURN_URL", "https://t.me/"),
-            vat_code=env.int("YOOKASSA_VAT_CODE", 1),
-            webhook_path=env.str("YOOKASSA_WEBHOOK_PATH", "/webhooks/yookassa"),
-        )
-
-
-@dataclass
-class WebhookConfig:
-    host: str = "0.0.0.0"
-    port: int = 8000
-
-    @staticmethod
-    def from_env(env: Env) -> "WebhookConfig":
-        return WebhookConfig(
-            host=env.str("WEBHOOK_HOST", "0.0.0.0"),
-            port=env.int("WEBHOOK_PORT", 8000),
-        )
-
-
-@dataclass
-class Miscellaneous:
+class Settings(BaseModel):
+    bot_token: str = Field(min_length=1)
+    openrouter_api_key: str = Field(min_length=1)
+    openrouter_model: str = Field(min_length=1)
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_timeout: float = Field(default=45.0, gt=0)
     log_level: str = "INFO"
 
-    @staticmethod
-    def from_env(env: Env) -> "Miscellaneous":
-        return Miscellaneous(log_level=env.str("LOG_LEVEL", "INFO"))
+    @field_validator("openrouter_base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        value = value.rstrip("/")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("OPENROUTER_BASE_URL должен начинаться с http:// или https://")
+        return value
+
+    @field_validator("log_level")
+    @classmethod
+    def normalize_log_level(cls, value: str) -> str:
+        return value.upper()
 
 
-@dataclass
-class Config:
-    tg_bot: TgBot
-    db: DbConfig
-    yookassa: YooKassaConfig
-    webhook: WebhookConfig
-    misc: Miscellaneous
+def load_config(path: str | Path | None = ".env") -> Settings:
+    if path is not None:
+        load_dotenv(path)
 
+    env_values = {
+        "bot_token": os.getenv("BOT_TOKEN", "").strip(),
+        "openrouter_api_key": os.getenv("OPENROUTER_API_KEY", "").strip(),
+        "openrouter_model": os.getenv("OPENROUTER_MODEL", "").strip(),
+        "openrouter_base_url": os.getenv(
+            "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
+        ).strip(),
+        "openrouter_timeout": os.getenv("OPENROUTER_TIMEOUT", "45").strip(),
+        "log_level": os.getenv("LOG_LEVEL", "INFO").strip(),
+    }
+    missing = [
+        variable
+        for variable, key in (
+            ("BOT_TOKEN", "bot_token"),
+            ("OPENROUTER_API_KEY", "openrouter_api_key"),
+            ("OPENROUTER_MODEL", "openrouter_model"),
+        )
+        if not env_values[key]
+    ]
+    if missing:
+        raise ConfigError("Не заполнены обязательные переменные окружения: " + ", ".join(missing))
 
-def load_config(path: str | None = None) -> Config:
-    env = Env()
-    if path:
-        env.read_env(path)
-    return Config(
-        tg_bot=TgBot.from_env(env),
-        db=DbConfig.from_env(env),
-        yookassa=YooKassaConfig.from_env(env),
-        webhook=WebhookConfig.from_env(env),
-        misc=Miscellaneous.from_env(env),
-    )
+    try:
+        return Settings(**env_values)
+    except ValueError as error:
+        raise ConfigError(f"Некорректная конфигурация: {error}") from error
