@@ -46,7 +46,7 @@ def test_parse_food_analysis_supports_no_food_result() -> None:
     )
 
     assert result.recognized is False
-    assert format_no_food_result().startswith("🤔")
+    assert format_no_food_result().startswith("Аня,")
 
 
 def test_format_food_result_contains_nutrition_and_warning() -> None:
@@ -94,7 +94,7 @@ def test_format_food_result_marks_unknown_ingredient_weight() -> None:
         nutrition=Nutrition(calories=100, proteins=1, fats=5, carbs=10),
     )
 
-    assert "вес не удалось оценить" in format_food_result(analysis)
+    assert "примерный вес неизвестен" in format_food_result(analysis)
 
 
 def test_format_food_result_limits_long_model_response() -> None:

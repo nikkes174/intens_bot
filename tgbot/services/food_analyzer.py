@@ -22,6 +22,12 @@ FOOD_ANALYSIS_PROMPT = """Ты — помощник по распознаван�
 6. Оценить белки, жиры и углеводы.
 7. Кратко объяснить состав блюда.
 
+Стиль поля comment:
+- Пиши живым, взрослым и естественным русским языком.
+- Кратко опиши сочетание продуктов и общие впечатления от блюда.
+- Используй одно-два полезных предложения без бессмысленной похвалы.
+- Не обращайся к пользователю свысока и не давай непрошеных советов.
+
 Правила:
 - Не придумывай продукты, которых не видно.
 - Не утверждай, что точно знаешь вес порций.
@@ -32,6 +38,8 @@ FOOD_ANALYSIS_PROMPT = """Ты — помощник по распознаван�
 - Если на фотографии нет еды, не придумывай блюдо.
 - Не ставь диагнозы и не давай медицинских назначений.
 - Не используй осуждающие формулировки.
+- Не пиши, что пользователь молодец, должен есть меньше или испортит фигуру.
+- Не используй детские, приторные или романтические обращения.
 - Отвечай на русском языке.
 - Возвращай только JSON без markdown-обёртки.
 
@@ -48,7 +56,7 @@ FOOD_ANALYSIS_PROMPT = """Ты — помощник по распознаван�
     "fats": 9,
     "carbs": 56
   },
-  "comment": "Блюдо содержит белок, углеводы и овощи.",
+  "comment": "Хорошее сочетание белка, углеводов и овощей. Такой обед выглядит сытным.",
   "warning": "Количество масла и соусов неизвестно."
 }
 
@@ -58,7 +66,7 @@ nutrition=null, а dish_name — null."""
 
 _JSON_BLOCK = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
 TELEGRAM_MESSAGE_LIMIT = 4096
-RESCALE_WARNING = "Пересчёт выполнен пропорционально новому общему весу блюда."
+RESCALE_WARNING = "Оценка обновлена с учётом указанного веса порции."
 
 
 def _extract_json(raw_response: str) -> str:
@@ -154,7 +162,7 @@ def _build_food_result(
             )
         else:
             ingredient_lines.append(
-                f"{_ingredient_icon(item.name)} {name} — вес не удалось оценить"
+                f"{_ingredient_icon(item.name)} {name} — примерный вес неизвестен"
             )
 
     ingredients = "\n".join(ingredient_lines)
@@ -169,24 +177,25 @@ def _build_food_result(
     if nutrition is None:
         raise ValueError("Для распознанного блюда отсутствует пищевая ценность")
 
-    warning = analysis.warning or "Количество масла и соусов неизвестно."
+    warning = _html_text(analysis.warning, warning_limit) if analysis.warning else ""
+    warning_block = f"\n\nℹ️ {warning}" if warning else ""
     return (
+        "Аня, готово! 🌿\n\n"
         f"🍽 <b>{dish_name}</b>\n\n"
-        f"🔎 <b>Что я вижу:</b>\n\n{ingredients or '• Состав сложно определить по фотографии.'}\n\n"
+        "Я определил следующий состав:\n\n"
+        f"{ingredients or 'Состав сложно определить по фотографии.'}\n\n"
         "━━━━━━━━━━━━━━━━\n\n"
-        "📊 <b>Примерная пищевая ценность</b>\n\n"
-        f"🔥 Калорийность: ~{_number(nutrition.calories)} ккал\n\n"
+        "📊 <b>Пищевая ценность</b>\n\n"
+        f"🔥 Калории: ~{_number(nutrition.calories)} ккал\n\n"
         f"🥩 Белки: ~{_number(nutrition.proteins)} г\n"
         f"🥑 Жиры: ~{_number(nutrition.fats)} г\n"
         f"🍞 Углеводы: ~{_number(nutrition.carbs)} г\n\n"
         "━━━━━━━━━━━━━━━━\n\n"
-        f"💡 <b>О блюде</b>\n\n{_html_text(analysis.comment, comment_limit)}\n\n"
-        "⚠️ "
-        f"{_html_text(warning, warning_limit)}\n"
-        "Фактическая калорийность может отличаться от оценки.\n\n"
+        f"💬 <b>Моё мнение</b>\n\n{_html_text(analysis.comment, comment_limit)}"
+        f"{warning_block}\n\n"
         "━━━━━━━━━━━━━━━━\n\n"
-        "📸 Хочешь проверить другое блюдо?\n"
-        "Просто отправь новую фотографию."
+        "Если в меню появится что-то ещё,\n"
+        "ты знаешь, кому отправить фото. 😉"
     )
 
 
@@ -221,20 +230,24 @@ def format_food_result(analysis: FoodAnalysis) -> str:
     if nutrition is None:
         raise ValueError("Для распознанного блюда отсутствует пищевая ценность")
     return (
+        "Аня, готово! 🌿\n\n"
         f"🍽 <b>{_html_text(analysis.dish_name or 'Блюдо', 60)}</b>\n\n"
-        "📊 <b>Примерная пищевая ценность</b>\n\n"
-        f"🔥 Калорийность: ~{_number(nutrition.calories)} ккал\n\n"
+        "📊 <b>Пищевая ценность</b>\n\n"
+        f"🔥 Калории: ~{_number(nutrition.calories)} ккал\n\n"
         f"🥩 Белки: ~{_number(nutrition.proteins)} г\n"
         f"🥑 Жиры: ~{_number(nutrition.fats)} г\n"
         f"🍞 Углеводы: ~{_number(nutrition.carbs)} г\n\n"
-        "⚠️ Детали ответа сокращены из-за ограничения длины сообщения."
+        "ℹ️ Ответ получился подробным, поэтому часть деталей я сократил."
     )
 
 
 def format_no_food_result() -> str:
     return (
-        "🤔 Кажется, на фотографии нет еды.\n\n"
-        "Попробуй отправить снимок блюда,\nпродукта или напитка."
+        "Аня, с этим снимком у меня не сложилось. 🤔\n\n"
+        "Не получилось уверенно определить,\n"
+        "что на фотографии.\n\n"
+        "Попробуем ещё раз?\n"
+        "Может, с другого ракурса."
     )
 
 
@@ -258,7 +271,7 @@ def rescale_analysis(analysis: FoodAnalysis, target_weight: float) -> FoodAnalys
         fats=analysis.nutrition.fats * multiplier,
         carbs=analysis.nutrition.carbs * multiplier,
     )
-    warning = analysis.warning or "Количество масла и соусов неизвестно."
+    warning = analysis.warning or ""
     warning = re.sub(rf"(?:\s*{re.escape(RESCALE_WARNING)})+\s*$", "", warning).strip()
     warning = f"{warning} {RESCALE_WARNING}".strip()
     return FoodAnalysis(

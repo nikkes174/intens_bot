@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 import re
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -12,6 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from tgbot.keyboards.main import (
+    SHOW_FOOD_BUTTON_TEXT,
     analysis_keyboard,
     main_menu_keyboard,
     retry_keyboard,
@@ -43,14 +45,23 @@ from tgbot.services.openrouter import (
 logger = logging.getLogger(__name__)
 router = Router(name="photo")
 
-ANALYZING_TEXT = "🔍 Анализирую твою еду..."
-PHOTO_REQUEST_TEXT = "📸 Отправь фотографию еды, которую хочешь проверить."
-GENERIC_ERROR_TEXT = (
-    "⚠️ Не удалось проанализировать фотографию.\n\nПопробуй отправить её ещё раз немного позже."
+ANALYZING_TEXTS = (
+    "Сейчас посмотрим, что здесь интересного. 🔍",
+    "Аня, одну секунду. Изучаю состав.",
+    "Выглядит интересно. Сейчас разберёмся.",
+    "Так, давай посмотрим, что у нас здесь.",
+    "Уже разбираюсь. Обещаю ничего не перепутать. 😉",
 )
-BUSY_TEXT = "🔍 Анализ ещё выполняется. Дождись результата и отправь следующую фотографию позже."
-STALE_RESULT_TEXT = "Этот результат уже неактуален.\nОтправь новую фотографию."
-CANCELLED_TEXT = "❌ Анализ отменён."
+PHOTO_REQUEST_TEXT = "Отлично, Аня. Жду фотографию.\n\nПосмотрим, что сегодня в меню. 🍽"
+ANOTHER_PHOTO_TEXT = "Конечно. Присылай следующую фотографию. 🌿"
+GENERIC_ERROR_TEXT = (
+    "Аня, сейчас что-то пошло не так.\n\nПопробуй отправить фото ещё раз.\nРазберёмся."
+)
+BUSY_TEXT = (
+    "Секунду, я ещё разбираюсь\nс предыдущим снимком.\n\nСкоро можно будет отправить следующий."
+)
+STALE_RESULT_TEXT = "Мы уже перешли к другому анализу.\n\nДавай продолжим с последним результатом."
+CANCELLED_TEXT = "Хорошо, этот анализ отменяем."
 WEIGHT_PATTERN = re.compile(r"^\d+(?:[.,]\d+)?$")
 
 LAST_ANALYSIS_KEY = "last_analysis"
@@ -180,15 +191,15 @@ def _openrouter_error_text(error: OpenRouterError) -> str:
     if isinstance(error, OpenRouterAuthError):
         return "⚠️ Неверный API-ключ OpenRouter или недостаточно прав доступа."
     if isinstance(error, OpenRouterPaymentError):
-        return "⚠️ Для запроса OpenRouter недостаточно средств или кредитов."
+        return GENERIC_ERROR_TEXT
     if isinstance(error, OpenRouterRateLimitError):
-        return "⚠️ Лимит запросов OpenRouter временно превышен. Попробуй позже."
+        return "Похоже, сервис немного перегружен.\n\nДавай попробуем чуть позже."
     if isinstance(error, OpenRouterRequestError):
-        return "⚠️ Ошибка запроса или выбранная модель OpenRouter недоступна."
+        return GENERIC_ERROR_TEXT
     if isinstance(error, OpenRouterTimeoutError):
-        return "⚠️ OpenRouter не ответил вовремя. Попробуй ещё раз позже."
+        return GENERIC_ERROR_TEXT
     if isinstance(error, (OpenRouterServerError, OpenRouterUnavailableError)):
-        return "⚠️ OpenRouter временно недоступен. Попробуй ещё раз позже."
+        return GENERIC_ERROR_TEXT
     return GENERIC_ERROR_TEXT
 
 
@@ -234,7 +245,7 @@ async def _handle_image(
             prepared_image: bytes | None = None
 
             try:
-                analysis_message = await message.answer(ANALYZING_TEXT)
+                analysis_message = await message.answer(random.choice(ANALYZING_TEXTS))
                 runtime.analysis_message = analysis_message
                 image_bytes = await _download_photo(message, bot)
                 prepared_image = prepare_image(image_bytes)
@@ -263,7 +274,10 @@ async def _handle_image(
                     await _mark_analysis_cancelled(analysis_message)
                     return
                 if str(error) == "Изображение слишком большое":
-                    text = "⚠️ Фотография слишком большая. Отправь изображение меньшего размера."
+                    text = (
+                        "Фото оказалось слишком большим.\n\n"
+                        "Попробуй отправить его обычной фотографией через Telegram."
+                    )
                 else:
                     text = GENERIC_ERROR_TEXT
                 logger.info("Image processing failed: %s", error.__class__.__name__)
@@ -297,7 +311,7 @@ async def _handle_image(
         _cleanup_inactive_user_states()
 
 
-@router.message(F.text == "📸 Распознать еду")
+@router.message(F.text == SHOW_FOOD_BUTTON_TEXT)
 async def ask_for_photo(message: Message, state: FSMContext) -> None:
     await reset_user_flow(state, _user_id(message))
     await message.answer(PHOTO_REQUEST_TEXT, reply_markup=main_menu_keyboard())
@@ -324,7 +338,7 @@ async def analyze_again_handler(callback: CallbackQuery, state: FSMContext) -> N
     if not await _is_current_result(callback, state):
         return
     await reset_user_flow(state, callback.from_user.id)
-    await callback.message.answer(PHOTO_REQUEST_TEXT, reply_markup=main_menu_keyboard())
+    await callback.message.answer(ANOTHER_PHOTO_TEXT, reply_markup=main_menu_keyboard())
 
 
 @router.callback_query(F.data == "refine_weight")
@@ -334,13 +348,15 @@ async def refine_weight_handler(callback: CallbackQuery, state: FSMContext) -> N
     data = await state.get_data()
     if not data.get(LAST_ANALYSIS_KEY):
         await callback.message.answer(
-            "Сначала отправь фотографию еды, чтобы было что пересчитывать.",
+            "Сначала пришли фотографию — тогда будет что уточнять.",
             reply_markup=main_menu_keyboard(),
         )
         return
     await state.set_state(FoodStates.waiting_for_weight)
     await callback.message.answer(
-        "⚖️ Напиши приблизительный общий вес блюда в граммах.\n\nНапример: 450"
+        "Аня, давай уточним вес.\n\n"
+        "Сколько граммов было в порции?\n\n"
+        "Просто отправь число, например 350."
     )
 
 
@@ -348,7 +364,7 @@ async def refine_weight_handler(callback: CallbackQuery, state: FSMContext) -> N
 async def weight_handler(message: Message, state: FSMContext) -> None:
     value = (message.text or "").strip().replace(" ", "")
     if not WEIGHT_PATTERN.fullmatch(value):
-        await message.answer("Введи вес числом в граммах, например: 450")
+        await message.answer("Напиши вес числом в граммах, например 350.")
         return
 
     target_weight = float(value.replace(",", "."))
@@ -366,7 +382,8 @@ async def weight_handler(message: Message, state: FSMContext) -> None:
     if updated_analysis is None:
         await reset_user_flow(state, _user_id(message))
         await message.answer(
-            "⚠️ Не могу корректно пересчитать результат: исходный вес ингредиентов неизвестен.",
+            "Не получилось надёжно пересчитать порцию по этому анализу.\n\n"
+            "Пришли новую фотографию — разберёмся ещё раз.",
             reply_markup=main_menu_keyboard(),
         )
         return
