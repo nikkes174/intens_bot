@@ -46,7 +46,7 @@ def test_parse_food_analysis_supports_no_food_result() -> None:
     )
 
     assert result.recognized is False
-    assert format_no_food_result().startswith("Аня,")
+    assert format_no_food_result().startswith("Вика,")
 
 
 def test_format_food_result_contains_nutrition_and_warning() -> None:

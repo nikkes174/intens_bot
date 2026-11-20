@@ -27,6 +27,7 @@ FOOD_ANALYSIS_PROMPT = """Ты — помощник по распознаван�
 - Кратко опиши сочетание продуктов и общие впечатления от блюда.
 - Используй одно-два полезных предложения без бессмысленной похвалы.
 - Не обращайся к пользователю свысока и не давай непрошеных советов.
+- Если обращаешься к пользователю по имени, используй «Вика», иногда «Виктория».
 
 Правила:
 - Не придумывай продукты, которых не видно.
@@ -180,7 +181,7 @@ def _build_food_result(
     warning = _html_text(analysis.warning, warning_limit) if analysis.warning else ""
     warning_block = f"\n\nℹ️ {warning}" if warning else ""
     return (
-        "Аня, готово! 🌿\n\n"
+        "Вика, готово! 🌿\n\n"
         f"🍽 <b>{dish_name}</b>\n\n"
         "Я определил следующий состав:\n\n"
         f"{ingredients or 'Состав сложно определить по фотографии.'}\n\n"
@@ -230,7 +231,7 @@ def format_food_result(analysis: FoodAnalysis) -> str:
     if nutrition is None:
         raise ValueError("Для распознанного блюда отсутствует пищевая ценность")
     return (
-        "Аня, готово! 🌿\n\n"
+        "Вика, готово! 🌿\n\n"
         f"🍽 <b>{_html_text(analysis.dish_name or 'Блюдо', 60)}</b>\n\n"
         "📊 <b>Пищевая ценность</b>\n\n"
         f"🔥 Калории: ~{_number(nutrition.calories)} ккал\n\n"
@@ -243,7 +244,7 @@ def format_food_result(analysis: FoodAnalysis) -> str:
 
 def format_no_food_result() -> str:
     return (
-        "Аня, с этим снимком у меня не сложилось. 🤔\n\n"
+        "Вика, с этим снимком у меня не сложилось. 🤔\n\n"
         "Не получилось уверенно определить,\n"
         "что на фотографии.\n\n"
         "Попробуем ещё раз?\n"

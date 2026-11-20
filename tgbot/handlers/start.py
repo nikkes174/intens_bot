@@ -9,7 +9,7 @@ from tgbot.keyboards.main import main_menu_keyboard
 router = Router(name="start")
 
 START_TEXT = (
-    "Аня, привет! 🌿\n\n"
+    "Вика, привет! 🌿\n\n"
     "Рад тебя видеть.\n\n"
     "У меня сегодня интересная задача —\n"
     "разбираться во всём, что оказывается\n"
