@@ -34,7 +34,8 @@ FOOD_ANALYSIS_PROMPT = """Ты — помощник по распознаван�
 - Не утверждай, что точно знаешь вес порций.
 - Не выдавай оценочные данные за измеренные.
 - Не придумывай скрытые ингредиенты.
-- Если масло, соус или способ приготовления неизвестны, сообщи об этом.
+- Учитывай неизвестные ингредиенты при оценке БЖУ.
+  Не добавляй отдельные предупреждения в поле comment.
 - Если изображение невозможно распознать, верни соответствующий статус.
 - Если на фотографии нет еды, не придумывай блюдо.
 - Не ставь диагнозы и не давай медицинских назначений.
@@ -150,7 +151,6 @@ def _build_food_result(
     dish_limit: int,
     ingredient_limit: int,
     comment_limit: int,
-    warning_limit: int,
     additional_limit: int,
 ) -> str:
     dish_name = _html_text(analysis.dish_name or "Блюдо", dish_limit)
@@ -178,8 +178,6 @@ def _build_food_result(
     if nutrition is None:
         raise ValueError("Для распознанного блюда отсутствует пищевая ценность")
 
-    warning = _html_text(analysis.warning, warning_limit) if analysis.warning else ""
-    warning_block = f"\n\nℹ️ {warning}" if warning else ""
     return (
         "Вика, готово! 🌿\n\n"
         f"🍽 <b>{dish_name}</b>\n\n"
@@ -192,8 +190,7 @@ def _build_food_result(
         f"🥑 Жиры: ~{_number(nutrition.fats)} г\n"
         f"🍞 Углеводы: ~{_number(nutrition.carbs)} г\n\n"
         "━━━━━━━━━━━━━━━━\n\n"
-        f"💬 <b>Моё мнение</b>\n\n{_html_text(analysis.comment, comment_limit)}"
-        f"{warning_block}\n\n"
+        f"💬 <b>Моё мнение</b>\n\n{_html_text(analysis.comment, comment_limit)}\n\n"
         "━━━━━━━━━━━━━━━━\n\n"
         "Если в меню появится что-то ещё,\n"
         "ты знаешь, кому отправить фото. 😉"
@@ -210,7 +207,6 @@ def format_food_result(analysis: FoodAnalysis) -> str:
         dish_limit=160,
         ingredient_limit=80,
         comment_limit=600,
-        warning_limit=500,
         additional_limit=300,
     )
     if _telegram_length(result) <= TELEGRAM_MESSAGE_LIMIT:
@@ -221,7 +217,6 @@ def format_food_result(analysis: FoodAnalysis) -> str:
         dish_limit=80,
         ingredient_limit=40,
         comment_limit=250,
-        warning_limit=250,
         additional_limit=160,
     )
     if _telegram_length(result) <= TELEGRAM_MESSAGE_LIMIT:
@@ -238,7 +233,7 @@ def format_food_result(analysis: FoodAnalysis) -> str:
         f"🥩 Белки: ~{_number(nutrition.proteins)} г\n"
         f"🥑 Жиры: ~{_number(nutrition.fats)} г\n"
         f"🍞 Углеводы: ~{_number(nutrition.carbs)} г\n\n"
-        "ℹ️ Ответ получился подробным, поэтому часть деталей я сократил."
+        "Ответ получился подробным, поэтому часть деталей я сократил."
     )
 
 

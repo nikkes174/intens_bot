@@ -49,13 +49,16 @@ def test_parse_food_analysis_supports_no_food_result() -> None:
     assert format_no_food_result().startswith("Вика,")
 
 
-def test_format_food_result_contains_nutrition_and_warning() -> None:
+def test_format_food_result_contains_nutrition_without_warning() -> None:
     result = format_food_result(parse_food_analysis(RECOGNIZED_JSON))
 
     assert "Курица с рисом" in result
     assert "~530 ккал" in result
     assert "~52 г" in result
-    assert "Масло неизвестно." in result
+    assert "~9 г" in result
+    assert "~56 г" in result
+    assert "Масло неизвестно." not in result
+    assert "ℹ️" not in result
 
 
 def test_rescale_analysis_uses_new_total_weight() -> None:
@@ -73,6 +76,9 @@ def test_rescale_analysis_uses_new_total_weight() -> None:
     assert updated.ingredients[0].weight_g == 150
     assert updated.nutrition is not None
     assert updated.nutrition.calories == 450
+    formatted = format_food_result(updated)
+    assert "~450 ккал" in formatted
+    assert "Оценка обновлена" not in formatted
 
 
 def test_rescale_analysis_does_not_guess_when_weights_are_missing() -> None:
@@ -115,6 +121,8 @@ def test_format_food_result_limits_long_model_response() -> None:
     assert "~100 ккал" in result
     assert result.count("<b>") == result.count("</b>")
     assert "&lt;ингредиент" in result
+    assert "Предупреждение" not in result
+    assert "ℹ️" not in result
 
 
 def test_rescale_analysis_does_not_duplicate_warning() -> None:
