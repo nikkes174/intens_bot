@@ -108,15 +108,15 @@ async def user_start(
 async def access_ok(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.answer()
 
-    await callback_query.message.answer(
-        START_TEXT,
-        reply_markup=first_start_keyboard(),
-        parse_mode="HTML",
-    )
     await _safe_log_event(
         callback_query.from_user.id,
         "consent_accepted",
         state,
+    )
+    await callback_query.message.answer(
+        START_TEXT,
+        reply_markup=first_start_keyboard(),
+        parse_mode="HTML",
     )
     await _safe_log_event(
         callback_query.from_user.id,
@@ -182,17 +182,25 @@ async def process_payment_email(message: Message, state: FSMContext, bot: Bot):
         "После оплаты, в течении минуты, вы получите доступ в закрытый канал🔐"
     )
 
-    payment_message = await bot.send_message(
-        message.from_user.id,
-        text,
-        parse_mode="HTML"
-    )
-
     payment_service.start_payment_monitor(
         payment_id,
         message.from_user.id,
         bot,
         visit_id=visit_id,
+    )
+
+    await bot.send_message(
+        message.from_user.id,
+        text,
+        parse_mode="HTML"
+    )
+
+    await _safe_log_event(
+        message.from_user.id,
+        "payment_link_sent",
+        state,
+        visit_id=visit_id,
+        payment_id=payment_id,
     )
 
 

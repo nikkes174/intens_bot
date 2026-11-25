@@ -42,7 +42,6 @@ client_circout/
 loylyty/
 .codex
 loyalty/
-tests
 enty_log.txt
 test_cancel.py
 get_project_front.py

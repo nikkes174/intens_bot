@@ -388,6 +388,7 @@ class AnalyticsService:
             "description_received",
             "email_entered",
             "payment_created",
+            "payment_link_sent",
             "payment_succeeded",
             "access_granted",
         )

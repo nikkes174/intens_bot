@@ -37,6 +37,8 @@ class PaymentService:
         self._payment_tasks: Dict[str, asyncio.Task] = {}
         self._recovery_task: Optional[asyncio.Task] = None
         self.recovery_interval = 60
+        self._invite_locks: Dict[str, asyncio.Lock] = {}
+        self._invite_lock_users: Dict[str, int] = {}
 
     def _configure_yookassa(self) -> None:
         if not self.shop_id or not self.secret_key:
@@ -165,7 +167,12 @@ class PaymentService:
 
     async def _recovery_loop(self, bot: Bot) -> None:
         while True:
-            await self.recover_pending_payments(bot)
+            try:
+                await self.recover_pending_payments(bot)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Ошибка фонового восстановления платежей")
             await asyncio.sleep(self.recovery_interval)
 
     async def _wait_for_payment(
@@ -300,7 +307,7 @@ class PaymentService:
                 payment_id=payment_id,
             )
 
-    async def _send_join_request_link(
+    async def _send_join_request_link_impl(
         self, user_id: int, bot: Bot, payment_id: Optional[str] = None
     ) -> None:
         # Keep the old direct-call behavior for legacy callers that do not
@@ -372,6 +379,28 @@ class PaymentService:
             logger.exception(
                 "Не удалось записать access_link_sent для %s", payment_id
             )
+
+    async def _send_join_request_link(
+        self, user_id: int, bot: Bot, payment_id: Optional[str] = None
+    ) -> None:
+        if payment_id is None:
+            await self._send_join_request_link_impl(user_id, bot, payment_id)
+            return
+
+        lock = self._invite_locks.setdefault(payment_id, asyncio.Lock())
+        self._invite_lock_users[payment_id] = (
+            self._invite_lock_users.get(payment_id, 0) + 1
+        )
+        try:
+            async with lock:
+                await self._send_join_request_link_impl(user_id, bot, payment_id)
+        finally:
+            users = self._invite_lock_users[payment_id] - 1
+            if users == 0:
+                self._invite_lock_users.pop(payment_id, None)
+                self._invite_locks.pop(payment_id, None)
+            else:
+                self._invite_lock_users[payment_id] = users
 
     async def approve_join_request(self, join_request, bot: Bot) -> bool:
         async with AsyncSessionLocal() as session:
