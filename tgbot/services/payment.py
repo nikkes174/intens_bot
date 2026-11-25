@@ -14,8 +14,9 @@ from config import PAYMENT_AMOUNT
 from tgbot.db.crud_users import UserCrud
 from tgbot.db.analytics import AnalyticsService
 from tgbot.db.db import AsyncSessionLocal
-from tgbot.db.models import PaymentAnalyticsModel
-from sqlalchemy import select
+from tgbot.db.models import FunnelEventModel, PaymentAnalyticsModel, PaymentInviteModel, utcnow
+from sqlalchemy import exists, select, update
+from sqlalchemy.exc import IntegrityError
 
 
 load_dotenv()
@@ -34,6 +35,8 @@ class PaymentService:
         self.vat_code = os.getenv("YOOKASSA_VAT_CODE")
         self._tasks: Set[asyncio.Task] = set()
         self._payment_tasks: Dict[str, asyncio.Task] = {}
+        self._recovery_task: Optional[asyncio.Task] = None
+        self.recovery_interval = 60
 
     def _configure_yookassa(self) -> None:
         if not self.shop_id or not self.secret_key:
@@ -147,9 +150,23 @@ class PaymentService:
         task.add_done_callback(cleanup)
 
     def schedule_recovery(self, bot: Bot) -> None:
-        task = asyncio.create_task(self.recover_pending_payments(bot))
+        if self._recovery_task is not None and not self._recovery_task.done():
+            return
+        task = asyncio.create_task(self._recovery_loop(bot))
+        self._recovery_task = task
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+
+        def cleanup(completed_task: asyncio.Task) -> None:
+            self._tasks.discard(completed_task)
+            if self._recovery_task is completed_task:
+                self._recovery_task = None
+
+        task.add_done_callback(cleanup)
+
+    async def _recovery_loop(self, bot: Bot) -> None:
+        while True:
+            await self.recover_pending_payments(bot)
+            await asyncio.sleep(self.recovery_interval)
 
     async def _wait_for_payment(
         self,
@@ -231,45 +248,130 @@ class PaymentService:
                 return
             await asyncio.sleep(15)
 
+    async def _save_payment_invite(
+        self, payment_id: str, user_id: int, invite_link: str
+    ) -> PaymentInviteModel:
+        async with AsyncSessionLocal() as session:
+            saved = PaymentInviteModel(
+                payment_id=payment_id,
+                user_id=user_id,
+                invite_link=invite_link,
+            )
+            session.add(saved)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                result = await session.execute(
+                    select(PaymentInviteModel).where(
+                        PaymentInviteModel.payment_id == payment_id
+                    )
+                )
+                existing = result.scalar_one_or_none()
+                if existing is None:
+                    raise
+                if existing.user_id != user_id:
+                    raise RuntimeError(
+                        "Payment invite belongs to a different Telegram user"
+                    )
+                return existing
+            return saved
+
+    async def _mark_payment_invite_sent(self, payment_id: str) -> None:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(PaymentInviteModel)
+                .where(
+                    PaymentInviteModel.payment_id == payment_id,
+                    PaymentInviteModel.sent_at.is_(None),
+                )
+                .values(sent_at=utcnow())
+            )
+            await session.commit()
+
+    async def _record_access_link_sent(self, user_id: int, payment_id: str) -> None:
+        async with AsyncSessionLocal() as session:
+            analytics = AnalyticsService(session)
+            payment = await analytics.get_payment(payment_id)
+            await analytics.log_event(
+                user_id=user_id,
+                event="access_link_sent",
+                visit_id=payment.visit_id if payment else None,
+                payment_id=payment_id,
+            )
+
     async def _send_join_request_link(
         self, user_id: int, bot: Bot, payment_id: Optional[str] = None
     ) -> None:
-        if payment_id is not None:
-            try:
-                async with AsyncSessionLocal() as session:
-                    if await AnalyticsService(session).has_event(
-                        user_id, "access_link_sent", payment_id
-                    ):
-                        return
-            except Exception:
-                logger.exception(
-                    "Не удалось проверить выдачу ссылки для %s", payment_id
-                )
+        # Keep the old direct-call behavior for legacy callers that do not
+        # have a payment id.  New payments always use the durable mapping.
+        if payment_id is None:
+            invite = await bot.create_chat_invite_link(
+                chat_id=self._get_channel_id(),
+                name=f"payment-{user_id}",
+                creates_join_request=True,
+            )
+            await bot.send_message(
+                user_id,
+                "✅Оплата подтверждена✅\n 👇🏾Перейдите по ссылке и отправьте заявку на вступление в канал:\n"
+                f"{invite.invite_link}",
+            )
+            return
 
-        invite = await bot.create_chat_invite_link(
-            chat_id=self._get_channel_id(),
-            name=f"payment-{user_id}",
-            creates_join_request=True,
-        )
+        try:
+            async with AsyncSessionLocal() as session:
+                analytics = AnalyticsService(session)
+                if await analytics.has_event(
+                    user_id, "access_link_sent", payment_id
+                ):
+                    return
+                result = await session.execute(
+                    select(PaymentInviteModel).where(
+                        PaymentInviteModel.payment_id == payment_id
+                    )
+                )
+                saved = result.scalar_one_or_none()
+        except Exception:
+            logger.exception("Не удалось проверить invite для %s", payment_id)
+            raise
+
+        if saved is not None:
+            if saved.user_id != user_id:
+                raise RuntimeError(
+                    "Payment invite belongs to a different Telegram user"
+                )
+            if saved.sent_at is not None:
+                await self._record_access_link_sent(user_id, payment_id)
+                return
+            invite_link = saved.invite_link
+        else:
+            invite = await bot.create_chat_invite_link(
+                chat_id=self._get_channel_id(),
+                name=f"payment-{user_id}",
+                creates_join_request=True,
+            )
+            # Persist before send.  If Telegram delivery fails, recovery can
+            # reuse this exact link instead of creating another invite.
+            saved = await self._save_payment_invite(
+                payment_id, user_id, invite.invite_link
+            )
+            invite_link = saved.invite_link
+
         await bot.send_message(
             user_id,
             "✅Оплата подтверждена✅\n 👇🏾Перейдите по ссылке и отправьте заявку на вступление в канал:\n"
-            f"{invite.invite_link}",
+            f"{invite_link}",
         )
-        if payment_id is not None:
-            try:
-                async with AsyncSessionLocal() as session:
-                    payment = await AnalyticsService(session).get_payment(payment_id)
-                    await AnalyticsService(session).log_event(
-                        user_id=user_id,
-                        event="access_link_sent",
-                        visit_id=payment.visit_id if payment else None,
-                        payment_id=payment_id,
-                    )
-            except Exception:
-                logger.exception(
-                    "Не удалось записать access_link_sent для %s", payment_id
-                )
+        try:
+            await self._mark_payment_invite_sent(payment_id)
+        except Exception:
+            logger.exception("Не удалось отметить отправку invite для %s", payment_id)
+        try:
+            await self._record_access_link_sent(user_id, payment_id)
+        except Exception:
+            logger.exception(
+                "Не удалось записать access_link_sent для %s", payment_id
+            )
 
     async def approve_join_request(self, join_request, bot: Bot) -> bool:
         async with AsyncSessionLocal() as session:
@@ -280,27 +382,52 @@ class PaymentService:
             try:
                 async with AsyncSessionLocal() as session:
                     analytics = AnalyticsService(session)
-                    payment = await analytics.get_latest_successful_payment(
-                        join_request.from_user.id
+                    payment_id = None
+                    visit_id = None
+                    invite_url = join_request.invite_link.invite_link
+                    result = await session.execute(
+                        select(PaymentInviteModel).where(
+                            PaymentInviteModel.invite_link == invite_url,
+                            PaymentInviteModel.user_id
+                            == join_request.from_user.id,
+                        )
                     )
-                    if payment is None:
+                    payment_invite = result.scalar_one_or_none()
+                    if payment_invite is not None:
+                        payment = await analytics.get_payment(
+                            payment_invite.payment_id
+                        )
+                        if (
+                            payment is not None
+                            and payment.user_id == join_request.from_user.id
+                            and payment.status == "succeeded"
+                        ):
+                            payment_id = payment.payment_id
+                            visit_id = payment.visit_id
+
+                    # A legacy invite has no durable payment mapping.  Keep
+                    # the existing approval behavior, but never attribute it
+                    # to an arbitrary latest payment.
+                    if payment_id is None:
                         already_logged = await analytics.has_event(
                             join_request.from_user.id, "access_granted"
                         )
                         if not already_logged:
                             await analytics.log_event(
-                                join_request.from_user.id, "access_granted"
+                                user_id=join_request.from_user.id,
+                                event="access_granted",
+                                visit_id=visit_id,
                             )
                     elif not await analytics.has_event(
                         join_request.from_user.id,
                         "access_granted",
-                        payment.payment_id,
+                        payment_id,
                     ):
                         await analytics.log_event(
                             user_id=join_request.from_user.id,
                             event="access_granted",
-                            visit_id=payment.visit_id,
-                            payment_id=payment.payment_id,
+                            visit_id=visit_id,
+                            payment_id=payment_id,
                         )
             except Exception:
                 logger.exception("Не удалось записать access_granted")
@@ -320,37 +447,83 @@ class PaymentService:
         return False
 
     async def recover_pending_payments(self, bot: Bot) -> None:
-        """Schedule monitors for payments that outlived the process."""
+        """Recover pending monitors and successful payments without delivery."""
 
         payment_users = {}
+        undelivered = []
+        tracked_payment_ids = set()
         try:
             async with AsyncSessionLocal() as session:
+                tracked_result = await session.execute(
+                    select(PaymentAnalyticsModel.payment_id)
+                )
+                tracked_payment_ids = set(tracked_result.scalars().all())
                 result = await session.execute(
-                    select(PaymentAnalyticsModel.payment_id, PaymentAnalyticsModel.user_id)
+                    select(PaymentAnalyticsModel)
                     .where(PaymentAnalyticsModel.status == "pending")
                 )
-                payment_users.update(result.all())
+                for payment in result.scalars().all():
+                    payment_users.setdefault(
+                        payment.payment_id,
+                        (payment.user_id, payment.visit_id),
+                    )
+
+                undelivered_result = await session.execute(
+                    select(PaymentAnalyticsModel).where(
+                        PaymentAnalyticsModel.status == "succeeded",
+                        ~exists().where(
+                            FunnelEventModel.payment_id
+                            == PaymentAnalyticsModel.payment_id,
+                            FunnelEventModel.event == "access_link_sent",
+                        ),
+                    )
+                )
+                undelivered = undelivered_result.scalars().all()
+                tracked_payment_ids.update(
+                    payment.payment_id for payment in undelivered
+                )
 
                 # Payments created by an older version have no analytics row.
                 # Keep their legacy monitor behavior instead of abandoning
                 # them after the migration.
                 for user in await UserCrud(session).get_users_list():
-                    if user.payment_id and not user.payment_ok:
-                        payment_users.setdefault(user.payment_id, user.user_id)
+                    if (
+                        user.payment_id
+                        and not user.payment_ok
+                        and user.payment_id not in tracked_payment_ids
+                    ):
+                        payment_users.setdefault(user.payment_id, (user.user_id, None))
         except Exception:
             logger.exception("Не удалось восстановить pending-платежи")
             return
 
-        for payment_id, user_id in payment_users.items():
-            visit_id = None
+        for payment_id, (user_id, visit_id) in payment_users.items():
+            self.start_payment_monitor(
+                payment_id,
+                user_id,
+                bot,
+                visit_id=visit_id,
+            )
+
+        for payment in undelivered:
             try:
+                # Restore the legacy flag when this payment still is the
+                # payment tracked by the original users table.  The invite is
+                # sent from the immutable analytics record either way.
                 async with AsyncSessionLocal() as session:
-                    visit_id = await AnalyticsService(session).get_payment_visit_id(
-                        payment_id
+                    await UserCrud(session).mark_payment_succeeded(
+                        payment.user_id, payment.payment_id
                     )
+                await self._send_join_request_link(
+                    payment.user_id,
+                    bot,
+                    payment.payment_id,
+                )
             except Exception:
-                logger.exception("Не удалось восстановить визит платежа %s", payment_id)
-            self.start_payment_monitor(payment_id, user_id, bot, visit_id=visit_id)
+                logger.exception(
+                    "Не удалось восстановить invite для платежа %s",
+                    payment.payment_id,
+                )
 
 
 payment_service = PaymentService()

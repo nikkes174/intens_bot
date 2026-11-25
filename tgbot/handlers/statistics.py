@@ -68,6 +68,15 @@ def parse_arguments(args: Optional[str]):
         raise ValueError("too many arguments")
     first = parts[0].lower()
     second = parts[1].lower() if len(parts) == 2 else None
+
+    if first.startswith("source:"):
+        source = first[len("source:") :]
+        if not source:
+            raise ValueError("empty source filter")
+        if second is not None and second not in PERIODS and second != "all":
+            raise ValueError("unknown period")
+        return source, (None if second in (None, "all") else second)
+
     if first in PERIODS:
         if second is not None:
             raise ValueError("period must be the only argument")
@@ -76,6 +85,30 @@ def parse_arguments(args: Optional[str]):
     if second is not None and second not in PERIODS and second != "all":
         raise ValueError("unknown period")
     return source, (None if second in (None, "all") else second)
+
+
+async def send_long_text(message, text: str) -> None:
+    limit = 3900
+    buffer = ""
+
+    for line in text.splitlines():
+        while len(line) > limit:
+            if buffer:
+                await message.answer(buffer, parse_mode=None)
+                buffer = ""
+            await message.answer(line[:limit], parse_mode=None)
+            line = line[limit:]
+
+        candidate = f"{buffer}\n{line}" if buffer else line
+        if len(candidate) > limit:
+            if buffer:
+                await message.answer(buffer, parse_mode=None)
+            buffer = line
+        else:
+            buffer = candidate
+
+    if buffer:
+        await message.answer(buffer, parse_mode=None)
 
 
 def _event(metrics, name: str) -> int:
@@ -90,9 +123,10 @@ def render_overall(metrics, sources, period):
         "",
         f"👥 Уникальных пользователей: {metrics['users']}",
         f"🔗 Всего переходов: {metrics['visits']}",
-        f"💳 Успешных покупок: {metrics['payments']}",
-        f"💰 Выручка: {format_money(metrics['revenue'])} ₽",
-        f"📈 Конверсия в покупку: {format_percent(metrics['conversion'])}",
+        f"💳 Покупок за период: {metrics['payments']}",
+        f"💰 Выручка за период: {format_money(metrics['revenue'])} ₽",
+        "📈 Конверсия когорты переходов "
+        f"(включая поздние оплаты): {format_percent(metrics['conversion'])}",
         "",
         "Воронка:",
         f"🚀 Запустили бота: {_event(metrics, 'bot_started')}",
@@ -109,8 +143,8 @@ def render_overall(metrics, sources, period):
         lines.extend(
             [
                 row["name"],
-                f"👥 {row['users']} | 💳 {row['payments']} | "
-                f"💰 {format_money(row['revenue'])} ₽",
+                f"👥 {row['users']} | 💳 {row['payments']} покупок за период | "
+                f"💰 {format_money(row['revenue'])} ₽ за период",
             ]
         )
     return "\n".join(lines)
@@ -129,11 +163,12 @@ def render_campaign(metrics, source, period):
             f"📖 Получили описание: {_event(metrics, 'description_received')}",
             f"📧 Ввели email: {_event(metrics, 'email_entered')}",
             f"💳 Перешли к оплате: {_event(metrics, 'payment_created')}",
-            f"💰 Покупок: {metrics['payments']}",
+            f"💰 Покупок за период: {metrics['payments']}",
             f"🔓 Получили доступ: {_event(metrics, 'access_granted')}",
             "",
-            f"💵 Выручка: {format_money(metrics['revenue'])} ₽",
-            f"📈 Конверсия когорты: {format_percent(metrics['conversion'])}",
+            f"💵 Выручка за период: {format_money(metrics['revenue'])} ₽",
+            "📈 Конверсия когорты (включая поздние оплаты): "
+            f"{format_percent(metrics['conversion'])}",
         ]
     )
 
@@ -148,7 +183,8 @@ async def statistics_command(message: Message, command: CommandObject):
         start, end = period_bounds(period)
     except ValueError:
         await message.answer(
-            "Формат: /stat, /stat youtube, /stat youtube* 7d, /stat today"
+            "Формат: /stat, /stat youtube, /stat youtube* 7d, "
+            "/stat source:today 7d"
         )
         return
 
@@ -175,4 +211,4 @@ async def statistics_command(message: Message, command: CommandObject):
         await message.answer("Не удалось получить статистику. Попробуйте позже.")
         return
 
-    await message.answer(text)
+    await send_long_text(message, text)

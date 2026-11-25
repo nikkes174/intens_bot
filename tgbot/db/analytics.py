@@ -322,7 +322,7 @@ class AnalyticsService:
             return None
         label, is_prefix = parsed
         if is_prefix:
-            return column.like(label + "%", escape="\\")
+            return column.startswith(label, autoescape=True)
         return column == label
 
     def _visit_conditions(
@@ -377,8 +377,6 @@ class AnalyticsService:
             .where(*visit_conditions)
             .subquery()
         )
-        cohort_users = select(visit_scope.c.user_id).distinct().subquery()
-
         users = await self._metric_value(
             select(func.count(func.distinct(visit_scope.c.user_id)))
         )
@@ -404,9 +402,14 @@ class AnalyticsService:
                 )
             )
 
-        payment_conditions = self._payment_conditions(source_filter, start, end)
+        successful_payment_conditions: List[Any] = [
+            PaymentAnalyticsModel.status == "succeeded"
+        ]
+        period_payment_conditions = self._payment_conditions(
+            source_filter, start, end
+        )
 
-        def payment_statement(expression: Any) -> Any:
+        def payment_statement(expression: Any, conditions: List[Any]) -> Any:
             statement = select(expression).select_from(PaymentAnalyticsModel)
             if source_filter is not None:
                 statement = statement.join(
@@ -415,20 +418,30 @@ class AnalyticsService:
                 ).where(
                     self._source_condition(TrafficSourceModel.name, source_filter)
                 )
-            return statement.where(*payment_conditions)
+            return statement.where(*conditions)
 
-        # Purchases and revenue are filtered by payment paid_at and the
-        # immutable source attribution.  Only the buyer count used for
-        # conversion is intersected with the explicitly selected cohort.
+        # Purchases and revenue are period metrics: use paid_at and the
+        # immutable source attribution.  Cohort conversion is intentionally a
+        # separate metric and includes later successful payments linked to
+        # the selected visits.
         payments = await self._metric_value(
-            payment_statement(func.count(func.distinct(PaymentAnalyticsModel.payment_id)))
+            payment_statement(
+                func.count(func.distinct(PaymentAnalyticsModel.payment_id)),
+                period_payment_conditions,
+            )
         )
         revenue = await self._metric_value(
-            payment_statement(func.coalesce(func.sum(PaymentAnalyticsModel.amount), 0))
+            payment_statement(
+                func.coalesce(func.sum(PaymentAnalyticsModel.amount), 0),
+                period_payment_conditions,
+            )
         )
         buyers = await self._metric_value(
-            payment_statement(func.count(func.distinct(PaymentAnalyticsModel.user_id))).where(
-                PaymentAnalyticsModel.user_id.in_(select(cohort_users.c.user_id))
+            payment_statement(
+                func.count(func.distinct(PaymentAnalyticsModel.user_id)),
+                successful_payment_conditions,
+            ).where(
+                PaymentAnalyticsModel.visit_id.in_(select(visit_scope.c.id))
             )
         )
 

@@ -112,3 +112,24 @@ class PaymentAnalyticsModel(Base):
     paid_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+
+
+class PaymentInviteModel(Base):
+    __tablename__ = "payment_invites"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payment_id: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False, index=True
+    )
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    invite_link: Mapped[str] = mapped_column(
+        String(512), unique=True, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    # A persisted send marker lets recovery retry the analytics event without
+    # sending the same already-created Telegram link again.
+    sent_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
