@@ -2,9 +2,10 @@ from datetime import date
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tgbot.db.models import UserModel
+from tgbot.db.models import PaymentAnalyticsModel, UserModel
 
 
 class UserCrud:
@@ -71,4 +72,22 @@ class UserCrud:
 
     async def has_successful_payment(self, user_id: int) -> bool:
         user = await self.get_user(user_id)
-        return bool(user and user.payment_ok)
+        if user and user.payment_ok:
+            return True
+
+        # Keep the legacy users.payment_ok check, but also recognize a
+        # successful analytics payment when several purchases have replaced
+        # the single legacy payment_id column.  If the new table is not yet
+        # present during an old deployment, retain the old behavior.
+        try:
+            result = await self.session.execute(
+                select(PaymentAnalyticsModel.id)
+                .where(
+                    PaymentAnalyticsModel.user_id == user_id,
+                    PaymentAnalyticsModel.status == "succeeded",
+                )
+                .limit(1)
+            )
+            return result.scalar_one_or_none() is not None
+        except SQLAlchemyError:
+            return False

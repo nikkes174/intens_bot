@@ -28,5 +28,9 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db():
+    # Import all model modules before create_all.  create_all is additive and
+    # therefore safe for the existing users table and its data.
+    from tgbot.db import models  # noqa: F401
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

@@ -2,7 +2,12 @@ import asyncio
 import logging
 import betterlogging as bl
 
-from aiogram.types import BotCommand, BotCommandScopeDefault, MenuButtonCommands
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+    MenuButtonCommands,
+)
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -10,7 +15,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from tgbot.config import load_config, Config
 from tgbot.db.db import init_db
 from tgbot.handlers import user_router
+from tgbot.handlers.statistics import STAT_ADMIN_ID, statistics_router
 from tgbot.middlewares.config import ConfigMiddleware
+from tgbot.services.payment import payment_service
 
 
 
@@ -22,6 +29,10 @@ async def on_startup(bot: Bot, admin_ids: list[int]):
 
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+    await bot.set_my_commands(
+        commands + [BotCommand(command="stat", description="Статистика продаж")],
+        scope=BotCommandScopeChat(chat_id=STAT_ADMIN_ID),
+    )
     await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 
@@ -54,10 +65,14 @@ async def main():
     bot = Bot(token=config.tg_bot.token, default=DefaultBotProperties(parse_mode='HTML'))
     dp = Dispatcher(storage=storage)
 
+    dp.include_router(statistics_router)
     dp.include_router(user_router)
     register_global_middlewares(dp, config)
 
     await init_db()
+    # Recovery performs only a short DB lookup and schedules each monitor in
+    # its own asyncio task; it must not delay polling startup.
+    payment_service.schedule_recovery(bot)
     await on_startup(bot, config.tg_bot.admin_ids)
     await dp.start_polling(bot)
 
