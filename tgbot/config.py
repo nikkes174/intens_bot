@@ -49,7 +49,11 @@ class TgBot:
     @staticmethod
     def from_env(env: Env):
         token = env.str("BOT_TOKEN")
-        admin_ids = list(map(int, env.list("ADMINS")))
+        admin_ids = [
+            int(value.strip())
+            for value in env.list("ADM_IDS", [])
+            if value.strip()
+        ]
         return TgBot(token=token, admin_ids=admin_ids)
 
 

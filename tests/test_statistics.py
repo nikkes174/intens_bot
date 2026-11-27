@@ -1,9 +1,19 @@
 import importlib.util
+import sys
+import types
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+try:
+    import environs  # noqa: F401
+except ModuleNotFoundError:
+    environs_stub = types.ModuleType("environs")
+    environs_stub.Env = object
+    sys.modules["environs"] = environs_stub
 
 
 def _load_statistics_module():
@@ -55,8 +65,9 @@ def test_report_counts_delivered_payment_links_not_payment_creation():
 
 
 class _Message:
-    def __init__(self, user_id):
+    def __init__(self, user_id, chat_type="private"):
         self.from_user = SimpleNamespace(id=user_id)
+        self.chat = SimpleNamespace(type=chat_type)
         self.parts = []
 
     async def answer(self, text, parse_mode=None):
@@ -65,7 +76,7 @@ class _Message:
 
 @pytest.mark.asyncio
 async def test_long_reports_are_split_below_telegram_limit():
-    message = _Message(statistics.ADMIN_ID)
+    message = _Message(123)
     original = "x" * 10000
 
     await statistics.send_long_text(message, original)
@@ -78,7 +89,12 @@ async def test_long_reports_are_split_below_telegram_limit():
 
 @pytest.mark.asyncio
 async def test_statistics_is_restricted_to_admin():
-    message = _Message(statistics.ADMIN_ID + 1)
-    await statistics.statistics_command(message, SimpleNamespace(args=None))
+    message = _Message(124)
+    config = SimpleNamespace(tg_bot=SimpleNamespace(admin_ids=[123]))
+    await statistics.statistics_command(
+        message,
+        SimpleNamespace(args=None),
+        config,
+    )
 
     assert message.parts == []

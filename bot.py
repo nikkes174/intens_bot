@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import betterlogging as bl
+from sqlalchemy import delete, select
 
 from aiogram.types import (
     BotCommand,
@@ -13,27 +14,97 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from tgbot.config import load_config, Config
-from tgbot.db.db import init_db
+from tgbot.db.db import AsyncSessionLocal, init_db
+from tgbot.db.models import AdminCommandScopeModel
 from tgbot.handlers import user_router
-from tgbot.handlers.statistics import STAT_ADMIN_ID, statistics_router
+from tgbot.handlers.statistics import statistics_router
 from tgbot.middlewares.config import ConfigMiddleware
 from tgbot.services.payment import payment_service
 
 
 
+async def _get_saved_admin_ids() -> set[int]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AdminCommandScopeModel.admin_id)
+        )
+        return set(result.scalars().all())
+
+
+async def _save_admin_ids(admin_ids: set[int]) -> None:
+    async with AsyncSessionLocal() as session:
+        await session.execute(delete(AdminCommandScopeModel))
+        session.add_all(
+            AdminCommandScopeModel(admin_id=admin_id)
+            for admin_id in sorted(admin_ids)
+        )
+        await session.commit()
+
+
 async def on_startup(bot: Bot, admin_ids: list[int]):
+    current_admin_ids = {int(admin_id) for admin_id in admin_ids}
+    try:
+        saved_admin_ids = await _get_saved_admin_ids()
+    except Exception:
+        logging.exception("Не удалось прочитать сохранённые меню администраторов")
+        saved_admin_ids = set()
 
     commands = [
-        BotCommand(command="start", description="Перезапуск бота"),
-
-
+        BotCommand(
+            command="start",
+            description="Перезапуск бота",
+        ),
     ]
-    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+
     await bot.set_my_commands(
-        commands + [BotCommand(command="stat", description="Статистика продаж")],
-        scope=BotCommandScopeChat(chat_id=STAT_ADMIN_ID),
+        commands,
+        scope=BotCommandScopeDefault(),
     )
-    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+
+    synchronization_failed = False
+    removed_admin_ids = saved_admin_ids - current_admin_ids
+    removed_admin_ids.add(599033114)
+    for removed_admin_id in sorted(removed_admin_ids):
+        try:
+            await bot.delete_my_commands(
+                scope=BotCommandScopeChat(chat_id=removed_admin_id)
+            )
+        except Exception:
+            synchronization_failed = True
+            logging.exception(
+                "Не удалось удалить меню администратора %s",
+                removed_admin_id,
+            )
+
+    for admin_id in sorted(current_admin_ids):
+        try:
+            await bot.set_my_commands(
+                commands + [
+                    BotCommand(
+                        command="stat",
+                        description="Статистика продаж",
+                    ),
+                ],
+                scope=BotCommandScopeChat(chat_id=admin_id),
+            )
+        except Exception:
+            synchronization_failed = True
+            logging.exception(
+                "Не удалось установить меню администратора %s",
+                admin_id,
+            )
+
+    await bot.set_chat_menu_button(
+        menu_button=MenuButtonCommands(),
+    )
+
+    if synchronization_failed:
+        return
+
+    try:
+        await _save_admin_ids(current_admin_ids)
+    except Exception:
+        logging.exception("Не удалось сохранить меню администраторов")
 
 
 

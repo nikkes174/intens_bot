@@ -133,3 +133,9 @@ class PaymentInviteModel(Base):
     sent_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class AdminCommandScopeModel(Base):
+    __tablename__ = "admin_command_scopes"
+
+    admin_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)

@@ -7,14 +7,13 @@ import pytz
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
+from tgbot.config import Config
 from tgbot.db.analytics import AnalyticsService, parse_source_filter
 from tgbot.db.db import AsyncSessionLocal
 
 
 logger = logging.getLogger(__name__)
 statistics_router = Router()
-ADMIN_ID = 599033114
-STAT_ADMIN_ID = ADMIN_ID
 MOSCOW = pytz.timezone("Europe/Moscow")
 PERIODS = {"today", "7d", "30d"}
 
@@ -174,8 +173,16 @@ def render_campaign(metrics, source, period):
 
 
 @statistics_router.message(Command("stat"))
-async def statistics_command(message: Message, command: CommandObject):
-    if message.from_user.id != ADMIN_ID:
+async def statistics_command(
+    message: Message,
+    command: CommandObject,
+    config: Config,
+):
+    if (
+        message.from_user is None
+        or message.from_user.id not in config.tg_bot.admin_ids
+        or message.chat.type != "private"
+    ):
         return
 
     try:
